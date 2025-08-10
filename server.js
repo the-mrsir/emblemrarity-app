@@ -59,7 +59,6 @@ const upsertColl = db.prepare("INSERT INTO collectible_item (collectibleHash, it
 const getColl = db.prepare("SELECT itemHash FROM collectible_item WHERE collectibleHash=?");
 const upsertItem = db.prepare("INSERT INTO item_emblem (itemHash,isEmblem,name,icon) VALUES (?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET isEmblem=excluded.isEmblem, name=excluded.name, icon=excluded.icon");
 const getItem = db.prepare("SELECT isEmblem,name,icon FROM item_emblem WHERE itemHash=?");
-const getManyItems = db.prepare("SELECT itemHash,isEmblem,name,icon FROM item_emblem WHERE itemHash IN (%s)".replace("%s", ",".join(["?"]*50)));  // not used but placeholder
 const getRarity = db.prepare("SELECT percent,label,source,updatedAt FROM rarity_cache WHERE itemHash=?");
 const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,source,updatedAt) VALUES (?,?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET percent=excluded.percent,label=excluded.label,source=excluded.source,updatedAt=excluded.updatedAt");
 
