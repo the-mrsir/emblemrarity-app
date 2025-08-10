@@ -1,9 +1,16 @@
 import express from "express";
 import axios from "axios";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { chromium } from "playwright";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const {
   PORT = 3000,
-  BASE_URL,                // e.g. https://emblemrarity.app
+  BASE_URL,
   BUNGIE_API_KEY,
   BUNGIE_CLIENT_ID,
   BUNGIE_CLIENT_SECRET
@@ -22,18 +29,17 @@ const BUNGIE = axios.create({
   headers: { "X-API-Key": BUNGIE_API_KEY }
 });
 
-// Simple in-memory token store keyed by a short session id in querystring.
-// For a real site, switch to a cookie or database.
+// In-memory token storage (per session id)
 const tokens = new Map();
 
 function makeState() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
-// ---- OAuth -----
+// OAuth start
 app.get("/login", (req, res) => {
   const state = makeState();
-  tokens.set(state, {}); // reserve key
+  tokens.set(state, {});
   const url = new URL("https://www.bungie.net/en/OAuth/Authorize");
   url.searchParams.set("client_id", BUNGIE_CLIENT_ID);
   url.searchParams.set("response_type", "code");
@@ -42,6 +48,7 @@ app.get("/login", (req, res) => {
   res.redirect(url.toString());
 });
 
+// OAuth callback
 app.get("/oauth/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -68,12 +75,12 @@ app.get("/oauth/callback", async (req, res) => {
 
     res.redirect(`/?sid=${encodeURIComponent(state)}`);
   } catch (e) {
-    console.error(e?.response?.data || e.message);
+    console.error("OAuth error:", e?.response?.data || e.message);
     res.status(500).send("OAuth failed");
   }
 });
 
-// ---- Bungie helpers -----
+// ---- Bungie helpers
 async function getAuthHeaders(sid) {
   const t = tokens.get(sid);
   if (!t) throw new Error("Not linked");
@@ -95,7 +102,7 @@ async function getProfile(sid, membershipType, membershipId) {
   const h = await getAuthHeaders(sid);
   const r = await BUNGIE.get(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
     headers: h,
-    params: { components: "800,900" } // profileCollectibles, characterCollectibles
+    params: { components: "800,900" }
   });
   return r.data?.Response;
 }
@@ -116,8 +123,7 @@ async function getDefs() {
 }
 
 function isUnlocked(state) {
-  // collectible bit 1 means NotAcquired
-  return (state & 1) === 0;
+  return (state & 1) === 0; // NotAcquired bit is off
 }
 
 async function getOwnedEmblemItemHashes(profile, defs) {
@@ -149,100 +155,97 @@ async function getOwnedEmblemItemHashes(profile, defs) {
   return [...new Set(itemHashes)];
 }
 
-// ---- Rarity fetching (Warmind first, light.gg fallback) -----
+// ---- Playwright-powered rarity fetch
+const RARITY_CACHE_FILE = path.join(process.cwd(), "rarity-cache.json");
 const rarityCache = new Map();
+try {
+  if (fs.existsSync(RARITY_CACHE_FILE)) {
+    const obj = JSON.parse(fs.readFileSync(RARITY_CACHE_FILE, "utf-8"));
+    for (const [k,v] of Object.entries(obj)) rarityCache.set(Number(k), v);
+  }
+} catch {}
 
-async function fetchWarmindRarity(itemHash) {
-  const url = `https://warmind.io/analytics/item/${itemHash}`;
+function persistCache() {
   try {
-    const resp = await axios.get(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
-      },
-      timeout: 20000
+    const obj = Object.fromEntries([...rarityCache.entries()]);
+    fs.writeFileSync(RARITY_CACHE_FILE, JSON.stringify(obj), "utf-8");
+  } catch {}
+}
+
+let browser;
+let page;
+let queue = [];
+let working = false;
+
+async function ensureBrowser() {
+  if (!browser) {
+    browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] });
+    page = await browser.newPage({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
     });
-    const html = resp.data;
-    const m1 = html.match(/Global Rarity[^%]*?(\d+(?:\.\d+)?)%/i);
-    const m2 = html.match(/Adjusted Rarity[^%]*?(\d+(?:\.\d+)?)%/i);
-    if (m1) return { percent: parseFloat(m1[1]), source: url, label: "Warmind Global" };
-    if (m2) return { percent: parseFloat(m2[1]), source: url, label: "Warmind Adjusted" };
-    return { percent: null, source: url, label: "Warmind" };
-  } catch {
-    return { percent: null, source: url, label: "Warmind" };
   }
 }
 
-async function fetchLightGGRarity(itemHash) {
+async function extractRarityFromHTML(html) {
+  // Try multiple patterns
+  const patterns = [
+    /Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i,
+    /Found by\s+(\d{1,3}(?:\.\d+)?)/i,
+    /Community Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m) return parseFloat(m[1]);
+  }
+  // Text-only fallback
+  const text = html.replace(/<[^>]*>/g, " ");
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) return parseFloat(m[1]);
+  }
+  return null;
+}
+
+async function fetchLightGGRarityBrowser(itemHash) {
+  await ensureBrowser();
   const url = `https://www.light.gg/db/items/${itemHash}/`;
   try {
-    const resp = await axios.get(url, {
-      headers: {
-        // look as real as possible
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.google.com/"
-      },
-      timeout: 25000,
-      // follow redirects enabled by default
-      validateStatus: (s) => s >= 200 && s < 400
-    });
-
-    const html = resp.data;
-
-    // Pattern A: Community Rarity ... Found by 45.96%
-    let m = html.match(/Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i);
-    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
-
-    // Pattern B: Found by 45.96%
-    m = html.match(/Found by\s+(\d{1,3}(?:\.\d+)?)/i);
-    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
-
-    // Pattern C: Community Rarity ... 45.96%
-    m = html.match(/Community Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i);
-    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
-
-    // DOM text fallback: strip tags and search again
-    const text = String(html).replace(/<[^>]*>/g, " ");
-    m = text.match(/Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i) || text.match(/Found by\s+(\d{1,3}(?:\.\d+)?)/i);
-    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
-
-    return { percent: null, source: url, label: "light.gg" };
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Small wait to let dynamic bits render
+    await page.waitForTimeout(400);
+    const html = await page.content();
+    const pct = await extractRarityFromHTML(html);
+    return { percent: pct, source: url, label: "light.gg Community" };
   } catch (e) {
     return { percent: null, source: url, label: "light.gg" };
   }
 }
 
-// --- optional: throttle requests so we don't get blocked ---
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
 async function fetchRarity(itemHash) {
   if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
-  let r = await fetchWarmindRarity(itemHash);
-  if (r.percent == null) {
-    r = await fetchLightGGRarity(itemHash);
-  }
-  rarityCache.set(itemHash, r);
-  return r;
+  // serialize requests through a simple queue to be gentle
+  return new Promise((resolve) => {
+    queue.push({ itemHash, resolve });
+    pumpQueue();
+  });
 }
 
-async function mapWithConcurrency(items, fn, limit = 6) {
-  const out = new Array(items.length);
-  let i = 0;
-  async function worker() {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx], idx);
-    }
+async function pumpQueue() {
+  if (working) return;
+  working = true;
+  while (queue.length) {
+    const job = queue.shift();
+    const res = await fetchLightGGRarityBrowser(job.itemHash);
+    rarityCache.set(job.itemHash, res);
+    persistCache();
+    // tiny delay between requests
+    await new Promise(r => setTimeout(r, 300));
+    job.resolve(res);
   }
-  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
-  await Promise.all(workers);
-  return out;
+  working = false;
 }
 
-// API for the page
+// API
 app.get("/api/emblems", async (req, res) => {
   try {
     const sid = req.query.sid;
@@ -255,21 +258,22 @@ app.get("/api/emblems", async (req, res) => {
     const hashes = await getOwnedEmblemItemHashes(profile, defs);
     if (!hashes.length) return res.json({ emblems: [] });
 
-    const rows = await mapWithConcurrency(hashes, async (h) => {
+    const rows = [];
+    for (const h of hashes) {
       const item = defs.item[String(h)];
       const name = item?.displayProperties?.name || `Item ${h}`;
       const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
       const img = icon ? `https://www.bungie.net${icon}` : null;
       const rarity = await fetchRarity(h);
-      return {
+      rows.push({
         itemHash: h,
         name,
         image: img,
         rarityPercent: rarity.percent,
         rarityLabel: rarity.label,
         sourceUrl: rarity.source
-      };
-    }, 6);
+      });
+    }
 
     rows.sort((a, b) => {
       const aa = a.rarityPercent == null ? 999999 : a.rarityPercent;
@@ -279,14 +283,19 @@ app.get("/api/emblems", async (req, res) => {
 
     res.json({ emblems: rows });
   } catch (e) {
-    console.error(e);
+    console.error("API error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
 
 // Landing page
 app.get("/", (req, res) => {
-  res.sendFile(process.cwd() + "/public/index.html");
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+process.on("SIGTERM", async () => {
+  if (browser) await browser.close();
+  process.exit(0);
 });
 
 app.listen(PORT, () => {

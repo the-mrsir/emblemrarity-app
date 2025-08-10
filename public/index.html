@@ -12,6 +12,7 @@
       --muted: #9aa3b2;
       --accent: #d5b36a;
       --line: #222631;
+      --chip: #202633;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, system-ui, -apple-system, Segoe UI, Arial; }
@@ -20,19 +21,23 @@
     .brand .sig { width: 10px; height: 10px; border: 2px solid var(--accent); transform: rotate(45deg); }
     .btn { padding: 10px 14px; border: 1px solid var(--accent); border-radius: 10px; text-decoration: none; color: var(--text); background: transparent; }
     .btn:hover { background: rgba(213,179,106,0.1); }
-    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    main { padding: 24px; max-width: 1200px; margin: 0 auto; }
     .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
     .input { background: var(--card); border: 1px solid var(--line); color: var(--text); padding: 10px 12px; border-radius: 10px; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+    .chip { background: var(--chip); border: 1px solid var(--line); color: var(--text); padding: 8px 10px; border-radius: 999px; cursor: pointer; user-select:none; }
+    .chip.active { border-color: var(--accent); }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; display:flex; flex-direction:column; }
     .imgwrap { position: relative; aspect-ratio: 16/9; background: #0a0c10; display:flex; align-items:center; justify-content:center; }
     .imgwrap img { width: 100%; height: 100%; object-fit: cover; }
-    .badge { position:absolute; top:10px; left:10px; background: rgba(15,17,21,0.8); padding: 6px 10px; border:1px solid var(--accent); border-radius: 999px; font-size: 12px; }
+    .badge { position:absolute; top:10px; left:10px; background: rgba(15,17,21,0.85); padding: 6px 10px; border:1px solid var(--accent); border-radius: 999px; font-size: 12px; }
     .card h3 { margin: 12px; font-size: 16px; }
     .meta { margin: 0 12px 12px 12px; color: var(--muted); font-size: 13px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
     .links { display:flex; gap:10px; margin: 0 12px 16px 12px; }
     .links a { font-size: 12px; color: var(--accent); text-decoration: none; }
     .empty { color: var(--muted); padding: 24px; }
+    .skeleton { background: #12151b; height: 180px; border-radius: 16px; border:1px solid var(--line); animation: pulse 1.2s infinite ease-in-out; }
+    @keyframes pulse { 0%{opacity:.5} 50%{opacity:1} 100%{opacity:.5} }
   </style>
 </head>
 <body>
@@ -46,11 +51,14 @@
       <select class="input" id="sort">
         <option value="rarity">Sort by rarity (rarest first)</option>
         <option value="name">Sort by name (A–Z)</option>
+        <option value="hash">Sort by item hash</option>
       </select>
+      <span class="chip" data-th="1">Show < 1%</span>
+      <span class="chip" data-th="0.1">Show < 0.1%</span>
       <span id="count" class="input" style="opacity:.8;">0 emblems</span>
     </div>
     <div id="status" class="empty">Log in to see your rarest emblems.</div>
-    <div class="grid" id="grid" style="display:none"></div>
+    <div class="grid" id="grid"></div>
   </main>
 
 <script>
@@ -62,17 +70,34 @@ const search = document.getElementById("search");
 const sortSel = document.getElementById("sort");
 const countEl = document.getElementById("count");
 const loginBtn = document.getElementById("loginBtn");
+const chips = Array.from(document.querySelectorAll(".chip"));
 
 let data = [];
 let filtered = [];
+let threshold = null;
+
+function renderSkeleton(n=8){
+  grid.innerHTML = "";
+  for(let i=0;i<n;i++){
+    const s = document.createElement("div");
+    s.className = "skeleton";
+    grid.appendChild(s);
+  }
+}
 
 function render() {
   grid.innerHTML = "";
   const q = (search.value || "").toLowerCase();
   filtered = data.filter(d => d.name.toLowerCase().includes(q));
 
+  if (threshold != null) {
+    filtered = filtered.filter(d => d.rarityPercent != null && d.rarityPercent < threshold);
+  }
+
   if (sortSel.value === "name") {
     filtered.sort((a,b) => a.name.localeCompare(b.name));
+  } else if (sortSel.value === "hash") {
+    filtered.sort((a,b) => a.itemHash - b.itemHash);
   } else {
     const v = x => x.rarityPercent == null ? 999999 : x.rarityPercent;
     filtered.sort((a,b) => v(a) - v(b));
@@ -80,6 +105,14 @@ function render() {
 
   countEl.textContent = `${filtered.length} emblems`;
 
+  if (!filtered.length) {
+    statusEl.style.display = "block";
+    statusEl.textContent = "No results.";
+    return;
+  }
+  statusEl.style.display = "none";
+
+  const frag = document.createDocumentFragment();
   filtered.forEach((e, i) => {
     const card = document.createElement("div");
     card.className = "card";
@@ -87,6 +120,7 @@ function render() {
     const imgwrap = document.createElement("div");
     imgwrap.className = "imgwrap";
     const img = document.createElement("img");
+    img.loading = "lazy";
     img.src = e.image || "";
     img.alt = e.name;
     imgwrap.appendChild(img);
@@ -108,22 +142,32 @@ function render() {
     links.className = "links";
     const lg = document.createElement("a");
     lg.href = `https://www.light.gg/db/items/${e.itemHash}/`; lg.target="_blank"; lg.rel="noopener"; lg.textContent = "light.gg";
-    const wm = document.createElement("a");
-    wm.href = `https://warmind.io/analytics/item/${e.itemHash}`; wm.target="_blank"; wm.rel="noopener"; wm.textContent = "Warmind";
-    links.append(lg, wm);
+    links.append(lg);
 
     card.append(imgwrap, title, meta, links);
-    grid.appendChild(card);
+    frag.appendChild(card);
   });
-
-  grid.style.display = filtered.length ? "grid" : "none";
-  statusEl.style.display = filtered.length ? "none" : "block";
-  if (!filtered.length) statusEl.textContent = "No results.";
+  grid.appendChild(frag);
 }
+
+chips.forEach(ch => {
+  ch.addEventListener("click", () => {
+    chips.forEach(c => c.classList.remove("active"));
+    if (threshold === Number(ch.dataset.th)) {
+      threshold = null;
+      render();
+      return;
+    }
+    ch.classList.add("active");
+    threshold = Number(ch.dataset.th);
+    render();
+  });
+});
 
 if (sid) {
   loginBtn.style.display = "none";
-  statusEl.textContent = "Fetching your emblems and rarity…";
+  statusEl.textContent = "Fetching your emblems and rarity...";
+  renderSkeleton(10);
   fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`)
     .then(r => r.json())
     .then(json => {
@@ -132,12 +176,10 @@ if (sid) {
         statusEl.textContent = "No emblems found.";
         return;
       }
-      statusEl.style.display = "none";
       render();
     })
     .catch(() => { statusEl.textContent = "Error loading data."; });
 }
-
 search.addEventListener("input", render);
 sortSel.addEventListener("change", render);
 </script>
