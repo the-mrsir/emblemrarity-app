@@ -220,15 +220,6 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function fetchRarity(itemHash) {
   if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
-  // small delay to be polite / avoid rate-limits
-  await sleep(350);
-  const r = await fetchLightGGRarity(itemHash);
-  rarityCache.set(itemHash, r);
-  return r;
-}
-
-async function fetchRarity(itemHash) {
-  if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
   let r = await fetchWarmindRarity(itemHash);
   if (r.percent == null) {
     r = await fetchLightGGRarity(itemHash);
