@@ -28,8 +28,6 @@
     .links{display:flex;gap:10px;margin:0 12px 16px 12px}
     .links a{font-size:12px;color:var(--accent);text-decoration:none}
     .empty{color:var(--muted);padding:24px}
-    .skeleton{background:#12151b;height:180px;border-radius:16px;border:1px solid var(--line);animation:pulse 1.2s infinite ease-in-out}
-    @keyframes pulse{0%{opacity:.5}50%{opacity:1}100%{opacity:.5}}
   </style>
 </head>
 <body>
@@ -45,8 +43,6 @@
         <option value="name">Sort by name (A–Z)</option>
         <option value="hash">Sort by item hash</option>
       </select>
-      <span class="chip" data-th="1">Show < 1%</span>
-      <span class="chip" data-th="0.1">Show < 0.1%</span>
       <span id="count" class="input" style="opacity:.8;">0 emblems</span>
     </div>
     <div id="status" class="empty">Log in to see your rarest emblems.</div>
@@ -62,49 +58,30 @@ const search = document.getElementById("search");
 const sortSel = document.getElementById("sort");
 const countEl = document.getElementById("count");
 const loginBtn = document.getElementById("loginBtn");
-const chips = Array.from(document.querySelectorAll(".chip"));
 
 let data = [];
 let filtered = [];
-let threshold = null;
-
-// SSE to stream rarity for visible/top hashes
-let es;
-function startSSE(hashes){
-  if (es) es.close();
-  es = new EventSource(`/api/rarity/stream?hashes=${hashes.join(",")}`);
-  es.onmessage = (ev) => {
-    const d = JSON.parse(ev.data);
-    const card = document.querySelector(`.card[data-hash='${d.itemHash}']`);
-    if (!card) return;
-    const badge = card.querySelector(".badge");
-    const pct = (d.percent != null) ? (Number(d.percent).toFixed(4) + "%") : "Unknown";
-    badge.textContent = `${badge.textContent.split("•")[0]}• ${pct}`;
-    card.querySelector(".meta .label").textContent = d.label || "";
-  };
-}
 
 function render() {
   grid.innerHTML = "";
   const q = (search.value || "").toLowerCase();
   filtered = data.filter(d => d.name.toLowerCase().includes(q));
-  if (threshold != null) filtered = filtered.filter(d => d.rarityPercent != null && d.rarityPercent < threshold);
   if (sortSel.value === "name") filtered.sort((a,b) => a.name.localeCompare(b.name));
   else if (sortSel.value === "hash") filtered.sort((a,b) => a.itemHash - b.itemHash);
   else filtered.sort((a,b) => (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
 
   countEl.textContent = `${filtered.length} emblems`;
+
   if (!filtered.length){ statusEl.style.display="block"; statusEl.textContent="No results."; return; }
   statusEl.style.display="none";
 
   const frag = document.createDocumentFragment();
-  const firstHashes = [];
   filtered.forEach((e, i) => {
     const card = document.createElement("div"); card.className="card"; card.dataset.hash = e.itemHash;
     const imgwrap = document.createElement("div"); imgwrap.className="imgwrap";
     const img = document.createElement("img"); img.loading="lazy"; img.src=e.image||""; img.alt=e.name;
     const badge = document.createElement("div"); badge.className="badge";
-    const pct = e.rarityPercent == null ? "..." : (e.rarityPercent.toFixed(4) + "%");
+    const pct = e.rarityPercent == null ? "Unknown" : e.rarityPercent.toFixed(4) + "%";
     badge.textContent = `#${i+1} • ${pct}`;
     imgwrap.append(img, badge);
     const title = document.createElement("h3"); title.textContent = e.name;
@@ -114,23 +91,9 @@ function render() {
     links.append(lg);
     card.append(imgwrap, title, meta, links);
     frag.appendChild(card);
-    if (i < 32) firstHashes.push(e.itemHash);
   });
   grid.appendChild(frag);
-
-  // start SSE for first batch
-  startSSE(firstHashes);
 }
-
-chips.forEach(ch => {
-  ch.addEventListener("click", () => {
-    chips.forEach(c => c.classList.remove("active"));
-    if (threshold === Number(ch.dataset.th)) { threshold = null; render(); return; }
-    ch.classList.add("active");
-    threshold = Number(ch.dataset.th);
-    render();
-  });
-});
 
 if (sid) {
   loginBtn.style.display = "none";

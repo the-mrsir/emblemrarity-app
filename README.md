@@ -1,18 +1,13 @@
-# Emblem Rarity v6 — Fast + reliable
+# Emblem Rarity v6.1 — More robust
 
-Major changes:
-- **Token refresh**: avoids silent failures once access token expires.
-- **Concurrent per-entity fetch**: emblem discovery is much faster (24-way pool).
-- **SQLite cache**: stores collectible→item, item→isEmblem/name/icon, and rarity. Repeat loads are instant.
-- **Rarity streaming**: `/api/rarity/stream` (SSE) pushes percentages for first ~32 emblems immediately after grid renders.
-- **Low memory**: no giant manifests.
+- Adds `/health` endpoint
+- Strong error logging + retries for per-entity manifest calls
+- Safer `/api/emblems` building (skip bad rows, no blanket 500)
+- Keeps token refresh, SQLite cache, and Playwright rarity
 
-Deploy
-1) Replace repo with v6, push.
-2) Railway env:
-   - BASE_URL, BUNGIE_API_KEY, BUNGIE_CLIENT_ID, BUNGIE_CLIENT_SECRET
-   - optional: NODE_OPTIONS=--max-old-space-size=1024
-3) Open `/login`, then `/?sid=...` will show emblems fast; rarity fills in.
+Deploy:
+1) Replace repo with v6.1
+2) Push and redeploy
+3) After login, `/debug?sid=...` should show counts; homepage should render emblems.
 
-Debug
-- `/debug?sid=...` shows counts and first hashes.
+If you still see errors, open Railway Logs — each failure is tagged (getMembership / getProfile / getEntity / buildRow).

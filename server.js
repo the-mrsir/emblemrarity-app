@@ -14,8 +14,7 @@ const {
   BASE_URL,
   BUNGIE_API_KEY,
   BUNGIE_CLIENT_ID,
-  BUNGIE_CLIENT_SECRET,
-  NODE_OPTIONS
+  BUNGIE_CLIENT_SECRET
 } = process.env;
 
 if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) {
@@ -26,11 +25,22 @@ if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) 
 const app = express();
 app.use(express.static("public"));
 
+// health
+app.get("/health", (_req,res)=>res.json({ok:true}));
+
 const BUNGIE = axios.create({
   baseURL: "https://www.bungie.net/Platform",
   headers: { "X-API-Key": BUNGIE_API_KEY },
   timeout: 20000
 });
+
+function logErr(tag, e) {
+  const status = e?.response?.status;
+  const data = e?.response?.data;
+  const msg = e?.message || e;
+  console.error(`[${tag}] status=${status} msg=${msg}`);
+  if (data) console.error(`[${tag}] body=`, JSON.stringify(data).slice(0, 400));
+}
 
 // ---------------- DB cache ----------------
 const db = new Database(path.join(process.cwd(), "cache.db"));
@@ -103,7 +113,7 @@ app.get("/oauth/callback", async (req, res) => {
 
     res.redirect(`/?sid=${encodeURIComponent(state)}`);
   } catch (e) {
-    console.error("OAuth error:", e?.response?.data || e.message);
+    logErr("oauth/callback", e);
     res.status(500).send("OAuth failed");
   }
 });
@@ -113,24 +123,28 @@ async function authedHeaders(sid) {
   if (!t) throw new Error("Not linked");
   const now = Math.floor(Date.now()/1000);
   if (t.expires_at - 15 < now) {
-    // refresh
-    const r = await axios.post(
-      "https://www.bungie.net/platform/app/oauth/token/",
-      new URLSearchParams({
-        client_id: BUNGIE_CLIENT_ID,
-        grant_type: "refresh_token",
-        refresh_token: t.refresh_token,
-        client_secret: BUNGIE_CLIENT_SECRET
-      }).toString(),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
-    );
-    const nt = r.data;
-    t = {
-      access_token: nt.access_token,
-      refresh_token: nt.refresh_token || t.refresh_token,
-      expires_at: now + (nt.expires_in || 3600)
-    };
-    tokens.set(sid, t);
+    try {
+      const r = await axios.post(
+        "https://www.bungie.net/platform/app/oauth/token/",
+        new URLSearchParams({
+          client_id: BUNGIE_CLIENT_ID,
+          grant_type: "refresh_token",
+          refresh_token: t.refresh_token,
+          client_secret: BUNGIE_CLIENT_SECRET
+        }).toString(),
+        { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+      );
+      const nt = r.data;
+      t = {
+        access_token: nt.access_token,
+        refresh_token: nt.refresh_token || t.refresh_token,
+        expires_at: now + (nt.expires_in || 3600)
+      };
+      tokens.set(sid, t);
+    } catch (e) {
+      logErr("token refresh", e);
+      throw e;
+    }
   }
   return { Authorization: `Bearer ${t.access_token}`, "X-API-Key": BUNGIE_API_KEY };
 }
@@ -156,11 +170,12 @@ async function getProfile(sid, membershipType, membershipId) {
   return r.data?.Response;
 }
 
-// Per-entity manifest with concurrency + DB cache
+// Per-entity manifest with retries + DB cache
 const inflight = new Map();
 async function getEntity(entityType, hash) {
   const key = `${entityType}:${hash}`;
-  // db cache for items
+
+  // DB cache first
   if (entityType === "DestinyInventoryItemDefinition") {
     const row = getItem.get(hash);
     if (row) return { displayProperties: { name: row.name, icon: row.icon }, secondaryIcon: row.icon, itemCategoryHashes: row.isEmblem ? [19] : [] };
@@ -171,20 +186,33 @@ async function getEntity(entityType, hash) {
   }
 
   if (inflight.has(key)) return inflight.get(key);
+
   const p = (async () => {
-    const r = await BUNGIE.get(`/Destiny2/Manifest/${entityType}/${hash}/`);
-    const data = r.data?.Response;
-    // store in DB cache for next time
-    if (entityType === "DestinyInventoryItemDefinition") {
-      const isEmblem = (data?.itemCategoryHashes || []).includes(19) ? 1 : 0;
-      const name = data?.displayProperties?.name || null;
-      const icon = data?.secondaryIcon || data?.displayProperties?.icon || null;
-      upsertItem.run(hash, isEmblem, name, icon);
-    } else if (entityType === "DestinyCollectibleDefinition") {
-      if (data?.itemHash != null) upsertColl.run(hash, data.itemHash);
+    const url = `/Destiny2/Manifest/${entityType}/${hash}/`;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await BUNGIE.get(url);
+        const data = r.data?.Response;
+        if (!data) return null;
+        if (entityType === "DestinyInventoryItemDefinition") {
+          const isEmblem = (data?.itemCategoryHashes || []).includes(19) ? 1 : 0;
+          const name = data?.displayProperties?.name || null;
+          const icon = data?.secondaryIcon || data?.displayProperties?.icon || null;
+          upsertItem.run(hash, isEmblem, name, icon);
+        } else if (entityType === "DestinyCollectibleDefinition") {
+          if (data?.itemHash != null) upsertColl.run(hash, data.itemHash);
+        }
+        return data;
+      } catch (e) {
+        logErr(`getEntity ${entityType}:${hash} attempt ${attempt}`, e);
+        const status = e?.response?.status;
+        if (status === 404) return null;
+        await new Promise(r => setTimeout(r, 250 * attempt));
+      }
     }
-    return data;
+    return null;
   })();
+
   inflight.set(key, p);
   try { return await p; } finally { inflight.delete(key); }
 }
@@ -197,7 +225,12 @@ async function concurrentMap(items, fn, concurrency=16) {
   async function worker() {
     while (i < items.length) {
       const idx = i++;
-      out[idx] = await fn(items[idx], idx);
+      try {
+        out[idx] = await fn(items[idx], idx);
+      } catch (e) {
+        logErr("concurrentMap item", e);
+        out[idx] = null;
+      }
     }
   }
   const workers = Array.from({length: Math.min(concurrency, items.length)}, worker);
@@ -216,28 +249,26 @@ async function getOwnedEmblemItemHashes(profile) {
   }
 
   const ownedArr = [...owned];
-  // Map collectibles -> itemHashes concurrently
   const itemHashes = (await concurrentMap(ownedArr, async (collHash) => {
     const coll = await getEntity("DestinyCollectibleDefinition", collHash);
     return coll?.itemHash ?? null;
   }, 24)).filter(Boolean);
 
-  // Filter emblem items concurrently
   const emblemHashes = (await concurrentMap(itemHashes, async (itemHash) => {
     const item = await getEntity("DestinyInventoryItemDefinition", itemHash);
     const cats = item?.itemCategoryHashes || [];
     return cats.includes(19) ? itemHash : null;
   }, 24)).filter(Boolean);
 
-  // unique
   return [...new Set(emblemHashes)];
 }
 
-// --------------- Playwright rarity with SSE ---------------
+// --------------- Playwright rarity ---------------
+const dbGetRarity = (hash) => getRarity.get(hash);
+const dbSetRarity = (hash, r) => setRarity.run(hash, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
+
 let browser;
-async function ensureBrowser() {
-  if (!browser) browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] });
-}
+async function ensureBrowser() { if (!browser) browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] }); }
 function extractPct(html) {
   const pats = [
     /Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i,
@@ -249,12 +280,9 @@ function extractPct(html) {
   for (const re of pats) { const m = text.match(re); if (m) return parseFloat(m[1]); }
   return null;
 }
-
 async function fetchRarityOnce(itemHash) {
-  // DB cache first
-  const row = getRarity.get(itemHash);
+  const row = dbGetRarity(itemHash);
   if (row && row.percent != null) return { percent: row.percent, label: row.label, source: row.source };
-
   await ensureBrowser();
   const ctx = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36" });
   const pg = await ctx.newPage();
@@ -266,41 +294,25 @@ async function fetchRarityOnce(itemHash) {
     const html = await pg.content();
     const pct = extractPct(html);
     res = { percent: pct, label: "light.gg Community", source: url };
-  } catch {}
-  await pg.close(); await ctx.close();
-  const now = Math.floor(Date.now()/1000);
-  setRarity.run(itemHash, res.percent, res.label, res.source, now);
+  } catch (e) {
+    logErr(`fetchRarity ${itemHash}`, e);
+  } finally {
+    try { await pg.close(); await ctx.close(); } catch {}
+  }
+  dbSetRarity(itemHash, res);
   return res;
 }
 
-// rarity API (single)
+// rarity API
 app.get("/api/rarity", async (req, res) => {
   try {
     const hash = Number(req.query.hash);
     if (!hash) return res.status(400).json({ error: "hash required" });
     const r = await fetchRarityOnce(hash);
     res.json(r);
-  } catch (e) { res.status(500).json({ error: "rarity error" }); }
-});
-
-// rarity SSE stream (batch)
-app.get("/api/rarity/stream", async (req, res) => {
-  try {
-    const hashes = String(req.query.hashes || "").split(",").map(x => Number(x)).filter(Boolean);
-    if (!hashes.length) return res.status(400).end("no hashes");
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-
-    for (const h of hashes) {
-      const r = await fetchRarityOnce(h);
-      res.write(`data: ${JSON.stringify({ itemHash: h, ...r })}\n\n`);
-      await new Promise(r => setTimeout(r, 120));
-    }
-    res.end();
   } catch (e) {
-    try { res.end(); } catch {}
+    logErr("api/rarity", e);
+    res.status(500).json({ error: "rarity error" });
   }
 });
 
@@ -310,52 +322,51 @@ app.get("/api/emblems", async (req, res) => {
     const sid = req.query.sid;
     if (!sid || !tokens.has(sid)) return res.status(401).json({ error: "Not linked" });
 
-    const mem = await getMembership(sid);
-    const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
+    let mem;
+    try { mem = await getMembership(sid); }
+    catch (e) { logErr("getMembership", e); return res.status(502).json({ error: "Membership lookup failed" }); }
 
-    const hashes = await getOwnedEmblemItemHashes(profile);
+    let profile;
+    try { profile = await getProfile(sid, mem.membershipType, mem.membershipId); }
+    catch (e) { logErr("getProfile", e); return res.status(502).json({ error: "Profile fetch failed" }); }
+
+    let hashes = [];
+    try { hashes = await getOwnedEmblemItemHashes(profile); }
+    catch (e) { logErr("getOwnedEmblemItemHashes", e); return res.status(500).json({ error: "Collectibles parse failed" }); }
+
     if (!hashes.length) return res.json({ emblems: [] });
 
-    // Build item rows concurrently
-    const rows = await concurrentMap(hashes, async (h) => {
-      const item = await getEntity("DestinyInventoryItemDefinition", h);
-      const name = item?.displayProperties?.name || `Item ${h}`;
-      const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
-      const img = icon ? `https://www.bungie.net${icon}` : null;
-      // pull cached rarity if present
-      const rc = getRarity.get(h);
-      const rarity = rc ? { percent: rc.percent, label: rc.label, source: rc.source } : { percent: null, label: null, source: null };
-      return { itemHash: h, name, image: img, rarityPercent: rarity.percent, rarityLabel: rarity.label, sourceUrl: rarity.source };
-    }, 24);
+    const rows = [];
+    for (const h of hashes) {
+      try {
+        const item = await getEntity("DestinyInventoryItemDefinition", h);
+        if (!item) continue;
+        const name = item?.displayProperties?.name || `Item ${h}`;
+        const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
+        const img = icon ? `https://www.bungie.net${icon}` : null;
+        const rc = getRarity.get(h);
+        rows.push({
+          itemHash: h,
+          name,
+          image: img,
+          rarityPercent: rc?.percent ?? null,
+          rarityLabel: rc?.label ?? null,
+          sourceUrl: rc?.source ?? null
+        });
+      } catch (e) {
+        logErr(`buildRow ${h}`, e);
+      }
+    }
 
-    // Sort by rarity if available
     rows.sort((a,b)=> (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
 
-    // Prewarm rarity for top 32 in background (doesn't block)
-    (async () => {
-      for (const h of hashes.slice(0,32)) { try { await fetchRarityOnce(h); } catch {} }
-    })();
+    // background prewarm (best-effort)
+    (async () => { for (const h of hashes.slice(0,32)) { try { await fetchRarityOnce(h); } catch(e){ logErr(`prewarm ${h}`, e); } } })();
 
     res.json({ emblems: rows });
   } catch (e) {
-    console.error("API error:", e);
+    logErr("api/emblems top", e);
     res.status(500).json({ error: "Server error" });
-  }
-});
-
-// Debug route
-app.get("/debug", async (req, res) => {
-  try {
-    const sid = req.query.sid;
-    if (!sid || !tokens.has(sid)) return res.status(401).send("Not linked");
-    const mem = await getMembership(sid);
-    const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
-    const pCount = Object.keys(profile?.profileCollectibles?.data?.collectibles || {}).length;
-    const cCount = Object.keys(profile?.characterCollectibles?.data || {}).length;
-    const hashes = await getOwnedEmblemItemHashes(profile);
-    res.json({ membershipType: mem.membershipType, membershipId: mem.membershipId, profileCollectibles: pCount, characters: cCount, emblemCount: hashes.length, firstHashes: hashes.slice(0, 10) });
-  } catch (e) {
-    res.status(500).send("debug error");
   }
 });
 
