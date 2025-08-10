@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Emblem Rarity</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Arial; margin: 20px; }
+    .btn { padding: 10px 14px; border: 1px solid #ccc; border-radius: 8px; text-decoration: none; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #ddd; padding: 8px; }
+    th { text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Emblem Rarity</h1>
+  <div id="actions"></div>
+  <div id="status"></div>
+  <table id="tbl" style="display:none">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Emblem</th>
+        <th>Community Rarity</th>
+        <th>light.gg</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+<script>
+function qs(k){ return new URLSearchParams(location.search).get(k); }
+const sid = qs("sid");
+
+const actions = document.getElementById("actions");
+const statusEl = document.getElementById("status");
+const tbl = document.getElementById("tbl");
+const tbody = tbl.querySelector("tbody");
+
+if (!sid) {
+  const a = document.createElement("a");
+  a.className = "btn";
+  a.href = "/login";
+  a.textContent = "Log in with Bungie.net";
+  actions.appendChild(a);
+} else {
+  actions.textContent = "Fetching your emblems. This can take a minute.";
+  fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`)
+    .then(r => r.json())
+    .then(data => {
+      actions.textContent = "";
+      if (!data.emblems || !data.emblems.length) {
+        statusEl.textContent = "No emblems found or not linked.";
+        return;
+      }
+      tbl.style.display = "table";
+      data.emblems.slice(0, 1000).forEach((e, i) => {
+        const tr = document.createElement("tr");
+        const rank = document.createElement("td"); rank.textContent = i + 1;
+        const name = document.createElement("td"); name.textContent = e.name;
+        const rar = document.createElement("td");
+        rar.textContent = e.communityRarity == null ? "Unknown" : (e.communityRarity.toFixed(4) + "%");
+        const lg = document.createElement("td");
+        if (e.lightgg) {
+          const link = document.createElement("a");
+          link.href = e.lightgg; link.target = "_blank"; link.rel = "noopener";
+          link.textContent = "light.gg";
+          lg.appendChild(link);
+        } else {
+          lg.textContent = "";
+        }
+        tr.append(rank, name, rar, lg);
+        tbody.appendChild(tr);
+      });
+    })
+    .catch(() => { statusEl.textContent = "Error loading data."; });
+}
+</script>
+</body>
+</html>
