@@ -5,75 +5,141 @@
   <title>Emblem Rarity</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Arial; margin: 20px; }
-    .btn { padding: 10px 14px; border: 1px solid #ccc; border-radius: 8px; text-decoration: none; }
-    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
-    th, td { border: 1px solid #ddd; padding: 8px; }
-    th { text-align: left; }
+    :root {
+      --bg: #0f1115;
+      --card: #171a21;
+      --text: #e6e8ee;
+      --muted: #9aa3b2;
+      --accent: #d5b36a;
+      --line: #222631;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, system-ui, -apple-system, Segoe UI, Arial; }
+    header { padding: 24px; border-bottom: 1px solid var(--line); display:flex; align-items:center; justify-content:space-between; }
+    .brand { font-size: 20px; letter-spacing: 1px; display:flex; gap:10px; align-items:center; }
+    .brand .sig { width: 10px; height: 10px; border: 2px solid var(--accent); transform: rotate(45deg); }
+    .btn { padding: 10px 14px; border: 1px solid var(--accent); border-radius: 10px; text-decoration: none; color: var(--text); background: transparent; }
+    .btn:hover { background: rgba(213,179,106,0.1); }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+    .input { background: var(--card); border: 1px solid var(--line); color: var(--text); padding: 10px 12px; border-radius: 10px; }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; display:flex; flex-direction:column; }
+    .imgwrap { position: relative; aspect-ratio: 16/9; background: #0a0c10; display:flex; align-items:center; justify-content:center; }
+    .imgwrap img { width: 100%; height: 100%; object-fit: cover; }
+    .badge { position:absolute; top:10px; left:10px; background: rgba(15,17,21,0.8); padding: 6px 10px; border:1px solid var(--accent); border-radius: 999px; font-size: 12px; }
+    .card h3 { margin: 12px; font-size: 16px; }
+    .meta { margin: 0 12px 12px 12px; color: var(--muted); font-size: 13px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .links { display:flex; gap:10px; margin: 0 12px 16px 12px; }
+    .links a { font-size: 12px; color: var(--accent); text-decoration: none; }
+    .empty { color: var(--muted); padding: 24px; }
   </style>
 </head>
 <body>
-  <h1>Emblem Rarity</h1>
-  <div id="actions"></div>
-  <div id="status"></div>
-  <table id="tbl" style="display:none">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Emblem</th>
-        <th>Community Rarity</th>
-        <th>light.gg</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <header>
+    <div class="brand"><span class="sig"></span> Emblem Rarity</div>
+    <a class="btn" id="loginBtn" href="/login">Log in with Bungie.net</a>
+  </header>
+  <main>
+    <div class="controls">
+      <input class="input" id="search" placeholder="Search emblem...">
+      <select class="input" id="sort">
+        <option value="rarity">Sort by rarity (rarest first)</option>
+        <option value="name">Sort by name (A–Z)</option>
+      </select>
+      <span id="count" class="input" style="opacity:.8;">0 emblems</span>
+    </div>
+    <div id="status" class="empty">Log in to see your rarest emblems.</div>
+    <div class="grid" id="grid" style="display:none"></div>
+  </main>
+
 <script>
 function qs(k){ return new URLSearchParams(location.search).get(k); }
 const sid = qs("sid");
-
-const actions = document.getElementById("actions");
 const statusEl = document.getElementById("status");
-const tbl = document.getElementById("tbl");
-const tbody = tbl.querySelector("tbody");
+const grid = document.getElementById("grid");
+const search = document.getElementById("search");
+const sortSel = document.getElementById("sort");
+const countEl = document.getElementById("count");
+const loginBtn = document.getElementById("loginBtn");
 
-if (!sid) {
-  const a = document.createElement("a");
-  a.className = "btn";
-  a.href = "/login";
-  a.textContent = "Log in with Bungie.net";
-  actions.appendChild(a);
-} else {
-  actions.textContent = "Fetching your emblems. This can take a minute.";
+let data = [];
+let filtered = [];
+
+function render() {
+  grid.innerHTML = "";
+  const q = (search.value || "").toLowerCase();
+  filtered = data.filter(d => d.name.toLowerCase().includes(q));
+
+  if (sortSel.value === "name") {
+    filtered.sort((a,b) => a.name.localeCompare(b.name));
+  } else {
+    const v = x => x.rarityPercent == null ? 999999 : x.rarityPercent;
+    filtered.sort((a,b) => v(a) - v(b));
+  }
+
+  countEl.textContent = `${filtered.length} emblems`;
+
+  filtered.forEach((e, i) => {
+    const card = document.createElement("div");
+    card.className = "card";
+
+    const imgwrap = document.createElement("div");
+    imgwrap.className = "imgwrap";
+    const img = document.createElement("img");
+    img.src = e.image || "";
+    img.alt = e.name;
+    imgwrap.appendChild(img);
+
+    const badge = document.createElement("div");
+    badge.className = "badge";
+    const pct = e.rarityPercent == null ? "Unknown" : e.rarityPercent.toFixed(4) + "%";
+    badge.textContent = `#${i+1} • ${pct}`;
+    imgwrap.appendChild(badge);
+
+    const title = document.createElement("h3");
+    title.textContent = e.name;
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `<span>${e.rarityLabel || ""}</span><span>${e.itemHash}</span>`;
+
+    const links = document.createElement("div");
+    links.className = "links";
+    const lg = document.createElement("a");
+    lg.href = `https://www.light.gg/db/items/${e.itemHash}/`; lg.target="_blank"; lg.rel="noopener"; lg.textContent = "light.gg";
+    const wm = document.createElement("a");
+    wm.href = `https://warmind.io/analytics/item/${e.itemHash}`; wm.target="_blank"; wm.rel="noopener"; wm.textContent = "Warmind";
+    links.append(lg, wm);
+
+    card.append(imgwrap, title, meta, links);
+    grid.appendChild(card);
+  });
+
+  grid.style.display = filtered.length ? "grid" : "none";
+  statusEl.style.display = filtered.length ? "none" : "block";
+  if (!filtered.length) statusEl.textContent = "No results.";
+}
+
+if (sid) {
+  loginBtn.style.display = "none";
+  statusEl.textContent = "Fetching your emblems and rarity…";
   fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`)
     .then(r => r.json())
-    .then(data => {
-      actions.textContent = "";
-      if (!data.emblems || !data.emblems.length) {
-        statusEl.textContent = "No emblems found or not linked.";
+    .then(json => {
+      data = json.emblems || [];
+      if (!data.length) {
+        statusEl.textContent = "No emblems found.";
         return;
       }
-      tbl.style.display = "table";
-      data.emblems.slice(0, 1000).forEach((e, i) => {
-        const tr = document.createElement("tr");
-        const rank = document.createElement("td"); rank.textContent = i + 1;
-        const name = document.createElement("td"); name.textContent = e.name;
-        const rar = document.createElement("td");
-        rar.textContent = e.communityRarity == null ? "Unknown" : (e.communityRarity.toFixed(4) + "%");
-        const lg = document.createElement("td");
-        if (e.lightgg) {
-          const link = document.createElement("a");
-          link.href = e.lightgg; link.target = "_blank"; link.rel = "noopener";
-          link.textContent = "light.gg";
-          lg.appendChild(link);
-        } else {
-          lg.textContent = "";
-        }
-        tr.append(rank, name, rar, lg);
-        tbody.appendChild(tr);
-      });
+      statusEl.style.display = "none";
+      render();
     })
     .catch(() => { statusEl.textContent = "Error loading data."; });
 }
+
+search.addEventListener("input", render);
+sortSel.addEventListener("change", render);
 </script>
 </body>
 </html>

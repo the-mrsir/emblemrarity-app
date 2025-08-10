@@ -30,7 +30,7 @@ function makeState() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
-// Start OAuth
+// ---- OAuth -----
 app.get("/login", (req, res) => {
   const state = makeState();
   tokens.set(state, {}); // reserve key
@@ -42,7 +42,6 @@ app.get("/login", (req, res) => {
   res.redirect(url.toString());
 });
 
-// OAuth callback
 app.get("/oauth/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -67,7 +66,6 @@ app.get("/oauth/callback", async (req, res) => {
       expires_at: Math.floor(Date.now() / 1000) + (tok.expires_in || 3600)
     });
 
-    // Send user to the app with their state key in the URL
     res.redirect(`/?sid=${encodeURIComponent(state)}`);
   } catch (e) {
     console.error(e?.response?.data || e.message);
@@ -75,6 +73,7 @@ app.get("/oauth/callback", async (req, res) => {
   }
 });
 
+// ---- Bungie helpers -----
 async function getAuthHeaders(sid) {
   const t = tokens.get(sid);
   if (!t) throw new Error("Not linked");
@@ -150,17 +149,73 @@ async function getOwnedEmblemItemHashes(profile, defs) {
   return [...new Set(itemHashes)];
 }
 
-async function fetchLightGGRarity(itemHash) {
+// ---- Rarity fetching (Warmind first, light.gg fallback) -----
+const rarityCache = new Map();
+
+async function fetchWarmindRarity(itemHash) {
+  const url = `https://warmind.io/analytics/item/${itemHash}`;
   try {
-    const url = `https://www.light.gg/db/items/${itemHash}/`;
-    const resp = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 20000 });
+    const resp = await axios.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      timeout: 20000
+    });
+    const html = resp.data;
+    const m1 = html.match(/Global Rarity[^%]*?(\d+(?:\.\d+)?)%/i);
+    const m2 = html.match(/Adjusted Rarity[^%]*?(\d+(?:\.\d+)?)%/i);
+    if (m1) return { percent: parseFloat(m1[1]), source: url, label: "Warmind Global" };
+    if (m2) return { percent: parseFloat(m2[1]), source: url, label: "Warmind Adjusted" };
+    return { percent: null, source: url, label: "Warmind" };
+  } catch {
+    return { percent: null, source: url, label: "Warmind" };
+  }
+}
+
+async function fetchLightGGRarity(itemHash) {
+  const url = `https://www.light.gg/db/items/${itemHash}/`;
+  try {
+    const resp = await axios.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9"
+      },
+      timeout: 20000
+    });
     const html = resp.data;
     const m = html.match(/Community Rarity[^%]*?(\d+(?:\.\d+)?)%/i);
-    if (!m) return { percent: null, url };
-    return { percent: parseFloat(m[1]), url };
+    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
+    return { percent: null, source: url, label: "light.gg" };
   } catch {
-    return { percent: null, url: null };
+    return { percent: null, source: url, label: "light.gg" };
   }
+}
+
+async function fetchRarity(itemHash) {
+  if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
+  let r = await fetchWarmindRarity(itemHash);
+  if (r.percent == null) {
+    r = await fetchLightGGRarity(itemHash);
+  }
+  rarityCache.set(itemHash, r);
+  return r;
+}
+
+async function mapWithConcurrency(items, fn, limit = 6) {
+  const out = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx], idx);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  await Promise.all(workers);
+  return out;
 }
 
 // API for the page
@@ -176,17 +231,25 @@ app.get("/api/emblems", async (req, res) => {
     const hashes = await getOwnedEmblemItemHashes(profile, defs);
     if (!hashes.length) return res.json({ emblems: [] });
 
-    const rows = [];
-    for (const h of hashes) {
+    const rows = await mapWithConcurrency(hashes, async (h) => {
       const item = defs.item[String(h)];
       const name = item?.displayProperties?.name || `Item ${h}`;
-      const { percent, url } = await fetchLightGGRarity(h);
-      rows.push({ itemHash: h, name, communityRarity: percent, lightgg: url });
-    }
+      const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
+      const img = icon ? `https://www.bungie.net${icon}` : null;
+      const rarity = await fetchRarity(h);
+      return {
+        itemHash: h,
+        name,
+        image: img,
+        rarityPercent: rarity.percent,
+        rarityLabel: rarity.label,
+        sourceUrl: rarity.source
+      };
+    }, 6);
 
     rows.sort((a, b) => {
-      const aa = a.communityRarity == null ? 999999 : a.communityRarity;
-      const bb = b.communityRarity == null ? 999999 : b.communityRarity;
+      const aa = a.rarityPercent == null ? 999999 : a.rarityPercent;
+      const bb = b.rarityPercent == null ? 999999 : b.rarityPercent;
       return aa - bb;
     });
 
