@@ -1,13 +1,11 @@
-# Emblem Rarity v6.1 — More robust
+# Emblem Rarity v6.2 — Faster + debug + lazy rarity
 
-- Adds `/health` endpoint
-- Strong error logging + retries for per-entity manifest calls
-- Safer `/api/emblems` building (skip bad rows, no blanket 500)
-- Keeps token refresh, SQLite cache, and Playwright rarity
+- Confirmed `/debug` route (with helpful message if `sid` missing)
+- Timing logs for every step (check Railway logs for `t=...ms` lines)
+- 32-way concurrency and DB caching for emblem discovery
+- Lazy rarity via `/api/rarity` when cards enter viewport
+- Token refresh intact; Playwright rarity cached to SQLite
 
-Deploy:
-1) Replace repo with v6.1
-2) Push and redeploy
-3) After login, `/debug?sid=...` should show counts; homepage should render emblems.
-
-If you still see errors, open Railway Logs — each failure is tagged (getMembership / getProfile / getEntity / buildRow).
+Tips:
+- First load is a cold cache. Second load should drop to a few seconds.
+- Use `/debug?sid=...` after `/login` to verify counts, and watch logs for timings.

@@ -16,8 +16,6 @@
     main{padding:24px;max-width:1200px;margin:0 auto}
     .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
     .input{background:var(--card);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:10px}
-    .chip{background:var(--chip);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:999px;cursor:pointer;user-select:none}
-    .chip.active{border-color:var(--accent)}
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
     .card{background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;display:flex;flex-direction:column}
     .imgwrap{position:relative;aspect-ratio:16/9;background:#0a0c10;display:flex;align-items:center;justify-content:center}
@@ -62,6 +60,25 @@ const loginBtn = document.getElementById("loginBtn");
 let data = [];
 let filtered = [];
 
+// Lazy rarity fetch for visible cards
+const io = new IntersectionObserver((entries) => {
+  entries.forEach(async (entry) => {
+    if (!entry.isIntersecting) return;
+    const card = entry.target;
+    if (card.dataset.loaded) return;
+    card.dataset.loaded = "1";
+    const hash = card.dataset.hash;
+    try {
+      const r = await fetch(`/api/rarity?hash=${encodeURIComponent(hash)}`).then(r=>r.json());
+      const pct = (r && r.percent != null) ? (Number(r.percent).toFixed(4) + "%") : "Unknown";
+      const badge = card.querySelector(".badge");
+      badge.textContent = `${badge.textContent.split("•")[0]}• ${pct}`;
+      const meta = card.querySelector(".meta .label");
+      if (meta) meta.textContent = r?.label || "";
+    } catch {}
+  });
+}, { rootMargin: "200px" });
+
 function render() {
   grid.innerHTML = "";
   const q = (search.value || "").toLowerCase();
@@ -81,7 +98,7 @@ function render() {
     const imgwrap = document.createElement("div"); imgwrap.className="imgwrap";
     const img = document.createElement("img"); img.loading="lazy"; img.src=e.image||""; img.alt=e.name;
     const badge = document.createElement("div"); badge.className="badge";
-    const pct = e.rarityPercent == null ? "Unknown" : e.rarityPercent.toFixed(4) + "%";
+    const pct = e.rarityPercent == null ? "..." : e.rarityPercent.toFixed(4) + "%";
     badge.textContent = `#${i+1} • ${pct}`;
     imgwrap.append(img, badge);
     const title = document.createElement("h3"); title.textContent = e.name;
@@ -93,6 +110,7 @@ function render() {
     frag.appendChild(card);
   });
   grid.appendChild(frag);
+  document.querySelectorAll(".card").forEach(c => io.observe(c));
 }
 
 if (sid) {

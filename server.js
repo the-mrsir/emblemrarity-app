@@ -25,9 +25,6 @@ if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) 
 const app = express();
 app.use(express.static("public"));
 
-// health
-app.get("/health", (_req,res)=>res.json({ok:true}));
-
 const BUNGIE = axios.create({
   baseURL: "https://www.bungie.net/Platform",
   headers: { "X-API-Key": BUNGIE_API_KEY },
@@ -40,6 +37,10 @@ function logErr(tag, e) {
   const msg = e?.message || e;
   console.error(`[${tag}] status=${status} msg=${msg}`);
   if (data) console.error(`[${tag}] body=`, JSON.stringify(data).slice(0, 400));
+}
+function logTime(label, start) {
+  const ms = Date.now() - start;
+  console.log(`[t=${ms}ms] ${label}`);
 }
 
 // ---------------- DB cache ----------------
@@ -219,7 +220,7 @@ async function getEntity(entityType, hash) {
 
 function isUnlocked(state) { return (state & 1) === 0; }
 
-async function concurrentMap(items, fn, concurrency=16) {
+async function concurrentMap(items, fn, concurrency=32) {
   const out = new Array(items.length);
   let i = 0;
   async function worker() {
@@ -249,24 +250,25 @@ async function getOwnedEmblemItemHashes(profile) {
   }
 
   const ownedArr = [...owned];
+  const t0 = Date.now();
   const itemHashes = (await concurrentMap(ownedArr, async (collHash) => {
     const coll = await getEntity("DestinyCollectibleDefinition", collHash);
     return coll?.itemHash ?? null;
-  }, 24)).filter(Boolean);
+  }, 32)).filter(Boolean);
+  logTime(`collectible→item (${itemHashes.length})`, t0);
 
+  const t1 = Date.now();
   const emblemHashes = (await concurrentMap(itemHashes, async (itemHash) => {
     const item = await getEntity("DestinyInventoryItemDefinition", itemHash);
     const cats = item?.itemCategoryHashes || [];
     return cats.includes(19) ? itemHash : null;
-  }, 24)).filter(Boolean);
+  }, 32)).filter(Boolean);
+  logTime(`item→emblem filter (${emblemHashes.length})`, t1);
 
   return [...new Set(emblemHashes)];
 }
 
 // --------------- Playwright rarity ---------------
-const dbGetRarity = (hash) => getRarity.get(hash);
-const dbSetRarity = (hash, r) => setRarity.run(hash, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
-
 let browser;
 async function ensureBrowser() { if (!browser) browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] }); }
 function extractPct(html) {
@@ -281,7 +283,7 @@ function extractPct(html) {
   return null;
 }
 async function fetchRarityOnce(itemHash) {
-  const row = dbGetRarity(itemHash);
+  const row = getRarity.get(itemHash);
   if (row && row.percent != null) return { percent: row.percent, label: row.label, source: row.source };
   await ensureBrowser();
   const ctx = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36" });
@@ -294,12 +296,9 @@ async function fetchRarityOnce(itemHash) {
     const html = await pg.content();
     const pct = extractPct(html);
     res = { percent: pct, label: "light.gg Community", source: url };
-  } catch (e) {
-    logErr(`fetchRarity ${itemHash}`, e);
-  } finally {
-    try { await pg.close(); await ctx.close(); } catch {}
-  }
-  dbSetRarity(itemHash, res);
+  } catch (e) { logErr(`fetchRarity ${itemHash}`, e); }
+  try { await pg.close(); await ctx.close(); } catch {}
+  setRarity.run(itemHash, res.percent, res.label, res.source, Math.floor(Date.now()/1000));
   return res;
 }
 
@@ -318,6 +317,7 @@ app.get("/api/rarity", async (req, res) => {
 
 // ---------------- API ----------------
 app.get("/api/emblems", async (req, res) => {
+  const start = Date.now();
   try {
     const sid = req.query.sid;
     if (!sid || !tokens.has(sid)) return res.status(401).json({ error: "Not linked" });
@@ -336,38 +336,46 @@ app.get("/api/emblems", async (req, res) => {
 
     if (!hashes.length) return res.json({ emblems: [] });
 
-    const rows = [];
-    for (const h of hashes) {
+    const t2 = Date.now();
+    const rows = await concurrentMap(hashes, async (h) => {
       try {
         const item = await getEntity("DestinyInventoryItemDefinition", h);
-        if (!item) continue;
+        if (!item) return null;
         const name = item?.displayProperties?.name || `Item ${h}`;
         const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
         const img = icon ? `https://www.bungie.net${icon}` : null;
         const rc = getRarity.get(h);
-        rows.push({
-          itemHash: h,
-          name,
-          image: img,
-          rarityPercent: rc?.percent ?? null,
-          rarityLabel: rc?.label ?? null,
-          sourceUrl: rc?.source ?? null
-        });
-      } catch (e) {
-        logErr(`buildRow ${h}`, e);
-      }
-    }
+        return { itemHash: h, name, image: img, rarityPercent: rc?.percent ?? null, rarityLabel: rc?.label ?? null, sourceUrl: rc?.source ?? null };
+      } catch (e) { logErr(`buildRow ${h}`, e); return null; }
+    }, 32);
+    logTime(`build rows (${rows.filter(Boolean).length})`, t2);
 
-    rows.sort((a,b)=> (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
+    const finalRows = rows.filter(Boolean).sort((a,b)=> (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
 
-    // background prewarm (best-effort)
-    (async () => { for (const h of hashes.slice(0,32)) { try { await fetchRarityOnce(h); } catch(e){ logErr(`prewarm ${h}`, e); } } })();
+    // prewarm top 24 rarity (best-effort)
+    (async () => { for (const r of finalRows.slice(0,24)) { try { await fetchRarityOnce(r.itemHash); } catch(e){ logErr(`prewarm ${r.itemHash}`, e); } } })();
 
-    res.json({ emblems: rows });
+    logTime("total /api/emblems", start);
+    res.json({ emblems: finalRows });
   } catch (e) {
     logErr("api/emblems top", e);
     res.status(500).json({ error: "Server error" });
   }
+});
+
+// Debug routes
+app.get("/debug", async (req, res) => {
+  try {
+    const sid = req.query.sid;
+    if (!sid) return res.status(400).json({ error: "sid required. Hit /login first, then use the sid from the URL." });
+    if (!tokens.has(sid)) return res.status(401).json({ error: "Not linked. Use /login again." });
+    const mem = await getMembership(sid);
+    const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
+    const pCount = Object.keys(profile?.profileCollectibles?.data?.collectibles || {}).length;
+    const cCount = Object.keys(profile?.characterCollectibles?.data || {}).length;
+    const hashes = await getOwnedEmblemItemHashes(profile);
+    res.json({ membershipType: mem.membershipType, membershipId: mem.membershipId, profileCollectibles: pCount, characters: cCount, emblemCount: hashes.length, firstHashes: hashes.slice(0, 10) });
+  } catch (e) { logErr("debug", e); res.status(500).json({ error: "debug error" }); }
 });
 
 // ---------------- UI ----------------
