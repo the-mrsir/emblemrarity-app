@@ -1,17 +1,18 @@
-# Emblem Rarity v5 — Fast load
+# Emblem Rarity v6 — Fast + reliable
 
-Key changes:
-- Immediate emblem grid (no waiting on rarity).
-- **Lazy rarity**: client fetches `/api/rarity?hash=` for cards as they scroll into view.
-- Playwright browser is reused with a small worker pool (concurrency=4).
-- Server pre-warms rarity for the first 24 hashes in the background.
-- Per-entity Bungie lookups (low memory) + disk cache for rarity.
+Major changes:
+- **Token refresh**: avoids silent failures once access token expires.
+- **Concurrent per-entity fetch**: emblem discovery is much faster (24-way pool).
+- **SQLite cache**: stores collectible→item, item→isEmblem/name/icon, and rarity. Repeat loads are instant.
+- **Rarity streaming**: `/api/rarity/stream` (SSE) pushes percentages for first ~32 emblems immediately after grid renders.
+- **Low memory**: no giant manifests.
 
-Railway tips:
-- Optional: `NODE_OPTIONS=--max-old-space-size=1024`
-- Make sure postinstall runs Playwright: it's in package.json.
+Deploy
+1) Replace repo with v6, push.
+2) Railway env:
+   - BASE_URL, BUNGIE_API_KEY, BUNGIE_CLIENT_ID, BUNGIE_CLIENT_SECRET
+   - optional: NODE_OPTIONS=--max-old-space-size=1024
+3) Open `/login`, then `/?sid=...` will show emblems fast; rarity fills in.
 
-Flow:
-1) `/login` → OAuth → redirect `/?sid=...`
-2) Client calls `/api/emblems?sid=...` → gets names + images instantly.
-3) As you scroll, client calls `/api/rarity?hash=...` and fills in percentages.
+Debug
+- `/debug?sid=...` shows counts and first hashes.
