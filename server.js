@@ -179,19 +179,52 @@ async function fetchLightGGRarity(itemHash) {
   try {
     const resp = await axios.get(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        // look as real as possible
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.google.com/"
       },
-      timeout: 20000
+      timeout: 25000,
+      // follow redirects enabled by default
+      validateStatus: (s) => s >= 200 && s < 400
     });
+
     const html = resp.data;
-    const m = html.match(/Community Rarity[^%]*?(\d+(?:\.\d+)?)%/i);
+
+    // Pattern A: Community Rarity ... Found by 45.96%
+    let m = html.match(/Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i);
     if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
+
+    // Pattern B: Found by 45.96%
+    m = html.match(/Found by\s+(\d{1,3}(?:\.\d+)?)/i);
+    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
+
+    // Pattern C: Community Rarity ... 45.96%
+    m = html.match(/Community Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i);
+    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
+
+    // DOM text fallback: strip tags and search again
+    const text = String(html).replace(/<[^>]*>/g, " ");
+    m = text.match(/Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i) || text.match(/Found by\s+(\d{1,3}(?:\.\d+)?)/i);
+    if (m) return { percent: parseFloat(m[1]), source: url, label: "light.gg Community" };
+
     return { percent: null, source: url, label: "light.gg" };
-  } catch {
+  } catch (e) {
     return { percent: null, source: url, label: "light.gg" };
   }
+}
+
+// --- optional: throttle requests so we don't get blocked ---
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function fetchRarity(itemHash) {
+  if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
+  // small delay to be polite / avoid rate-limits
+  await sleep(350);
+  const r = await fetchLightGGRarity(itemHash);
+  rarityCache.set(itemHash, r);
+  return r;
 }
 
 async function fetchRarity(itemHash) {
