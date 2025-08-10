@@ -29,14 +29,10 @@ const BUNGIE = axios.create({
   headers: { "X-API-Key": BUNGIE_API_KEY }
 });
 
-// In-memory token storage (per session id)
+// ---------------- OAuth ----------------
 const tokens = new Map();
+function makeState() { return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2); }
 
-function makeState() {
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-}
-
-// OAuth start
 app.get("/login", (req, res) => {
   const state = makeState();
   tokens.set(state, {});
@@ -48,7 +44,6 @@ app.get("/login", (req, res) => {
   res.redirect(url.toString());
 });
 
-// OAuth callback
 app.get("/oauth/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
@@ -80,7 +75,7 @@ app.get("/oauth/callback", async (req, res) => {
   }
 });
 
-// ---- Bungie helpers
+// --------------- Bungie helpers ---------------
 async function getAuthHeaders(sid) {
   const t = tokens.get(sid);
   if (!t) throw new Error("Not linked");
@@ -102,60 +97,55 @@ async function getProfile(sid, membershipType, membershipId) {
   const h = await getAuthHeaders(sid);
   const r = await BUNGIE.get(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
     headers: h,
-    params: { components: "800,900" }
+    params: { components: "800,900" } // profileCollectibles, characterCollectibles
   });
   return r.data?.Response;
 }
 
-let defsCache = { collectible: null, item: null };
-async function getDefs() {
-  if (defsCache.collectible && defsCache.item) return defsCache;
-  const mf = await BUNGIE.get("/Destiny2/Manifest/");
-  const paths = mf.data.Response.jsonWorldComponentContentPaths.en;
-  const base = "https://www.bungie.net";
-  const [coll, item] = await Promise.all([
-    axios.get(base + paths.DestinyCollectibleDefinition),
-    axios.get(base + paths.DestinyInventoryItemDefinition)
-  ]);
-  defsCache.collectible = coll.data;
-  defsCache.item = item.data;
-  return defsCache;
+// ---- Per-entity manifest fetch (low memory) ----
+const entityCache = new Map(); // key: `${type}:${hash}`
+async function getEntity(entityType, hash) {
+  const key = `${entityType}:${hash}`;
+  if (entityCache.has(key)) return entityCache.get(key);
+  const url = `/Destiny2/Manifest/${entityType}/${hash}/`;
+  const r = await BUNGIE.get(url);
+  const data = r.data?.Response;
+  entityCache.set(key, data);
+  return data;
 }
 
-function isUnlocked(state) {
-  return (state & 1) === 0; // NotAcquired bit is off
-}
+function isUnlocked(state) { return (state & 1) === 0; } // bit 1 is NotAcquired
 
-async function getOwnedEmblemItemHashes(profile, defs) {
-  const owned = new Set();
+async function getOwnedEmblemItemHashes(profile) {
+  const ownedCollectibleHashes = new Set();
 
   const pColl = profile?.profileCollectibles?.data?.collectibles || {};
   for (const [hash, v] of Object.entries(pColl)) {
-    if (isUnlocked(v?.state ?? 0)) owned.add(Number(hash));
+    if (isUnlocked(v?.state ?? 0)) ownedCollectibleHashes.add(Number(hash));
   }
   const chars = profile?.characterCollectibles?.data || {};
   for (const c of Object.values(chars)) {
     const colls = c?.collectibles || {};
     for (const [hash, v] of Object.entries(colls)) {
-      if (isUnlocked(v?.state ?? 0)) owned.add(Number(hash));
+      if (isUnlocked(v?.state ?? 0)) ownedCollectibleHashes.add(Number(hash));
     }
   }
 
   const EMBLEM_CATEGORY_HASH = 19;
   const itemHashes = [];
-  for (const ch of owned) {
-    const c = defs.collectible[String(ch)];
-    const itemHash = c?.itemHash;
+
+  for (const collHash of ownedCollectibleHashes) {
+    const coll = await getEntity("DestinyCollectibleDefinition", collHash);
+    const itemHash = coll?.itemHash;
     if (itemHash == null) continue;
-    const item = defs.item[String(itemHash)];
-    if (!item) continue;
-    const cats = item.itemCategoryHashes || [];
+    const item = await getEntity("DestinyInventoryItemDefinition", itemHash);
+    const cats = item?.itemCategoryHashes || [];
     if (cats.includes(EMBLEM_CATEGORY_HASH)) itemHashes.push(itemHash);
   }
   return [...new Set(itemHashes)];
 }
 
-// ---- Playwright-powered rarity fetch
+// --------------- Playwright rarity (light.gg) ---------------
 const RARITY_CACHE_FILE = path.join(process.cwd(), "rarity-cache.json");
 const rarityCache = new Map();
 try {
@@ -165,16 +155,12 @@ try {
   }
 } catch {}
 
-function persistCache() {
-  try {
-    const obj = Object.fromEntries([...rarityCache.entries()]);
-    fs.writeFileSync(RARITY_CACHE_FILE, JSON.stringify(obj), "utf-8");
-  } catch {}
+function persistRarity() {
+  try { fs.writeFileSync(RARITY_CACHE_FILE, JSON.stringify(Object.fromEntries(rarityCache)), "utf-8"); } catch {}
 }
 
-let browser;
-let page;
-let queue = [];
+let browser, page;
+let q = [];
 let working = false;
 
 async function ensureBrowser() {
@@ -186,8 +172,7 @@ async function ensureBrowser() {
   }
 }
 
-async function extractRarityFromHTML(html) {
-  // Try multiple patterns
+function extractFromHTML(html) {
   const patterns = [
     /Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i,
     /Found by\s+(\d{1,3}(?:\.\d+)?)/i,
@@ -197,7 +182,6 @@ async function extractRarityFromHTML(html) {
     const m = html.match(re);
     if (m) return parseFloat(m[1]);
   }
-  // Text-only fallback
   const text = html.replace(/<[^>]*>/g, " ");
   for (const re of patterns) {
     const m = text.match(re);
@@ -211,10 +195,9 @@ async function fetchLightGGRarityBrowser(itemHash) {
   const url = `https://www.light.gg/db/items/${itemHash}/`;
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    // Small wait to let dynamic bits render
     await page.waitForTimeout(400);
     const html = await page.content();
-    const pct = await extractRarityFromHTML(html);
+    const pct = extractFromHTML(html);
     return { percent: pct, source: url, label: "light.gg Community" };
   } catch (e) {
     return { percent: null, source: url, label: "light.gg" };
@@ -223,29 +206,24 @@ async function fetchLightGGRarityBrowser(itemHash) {
 
 async function fetchRarity(itemHash) {
   if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
-  // serialize requests through a simple queue to be gentle
-  return new Promise((resolve) => {
-    queue.push({ itemHash, resolve });
-    pumpQueue();
-  });
+  return new Promise((resolve) => { q.push({ itemHash, resolve }); pump(); });
 }
 
-async function pumpQueue() {
+async function pump() {
   if (working) return;
   working = true;
-  while (queue.length) {
-    const job = queue.shift();
+  while (q.length) {
+    const job = q.shift();
     const res = await fetchLightGGRarityBrowser(job.itemHash);
     rarityCache.set(job.itemHash, res);
-    persistCache();
-    // tiny delay between requests
-    await new Promise(r => setTimeout(r, 300));
+    persistRarity();
+    await new Promise(r => setTimeout(r, 300)); // polite delay
     job.resolve(res);
   }
   working = false;
 }
 
-// API
+// ---------------- API ----------------
 app.get("/api/emblems", async (req, res) => {
   try {
     const sid = req.query.sid;
@@ -253,14 +231,13 @@ app.get("/api/emblems", async (req, res) => {
 
     const mem = await getMembership(sid);
     const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
-    const defs = await getDefs();
 
-    const hashes = await getOwnedEmblemItemHashes(profile, defs);
+    const hashes = await getOwnedEmblemItemHashes(profile);
     if (!hashes.length) return res.json({ emblems: [] });
 
     const rows = [];
     for (const h of hashes) {
-      const item = defs.item[String(h)];
+      const item = await getEntity("DestinyInventoryItemDefinition", h);
       const name = item?.displayProperties?.name || `Item ${h}`;
       const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
       const img = icon ? `https://www.bungie.net${icon}` : null;
@@ -288,16 +265,32 @@ app.get("/api/emblems", async (req, res) => {
   }
 });
 
-// Landing page
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+// Debug route to verify data flow
+app.get("/debug", async (req, res) => {
+  try {
+    const sid = req.query.sid;
+    if (!sid || !tokens.has(sid)) return res.status(401).send("Not linked");
+    const mem = await getMembership(sid);
+    const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
+    const pCount = Object.keys(profile?.profileCollectibles?.data?.collectibles || {}).length;
+    const cCount = Object.keys(profile?.characterCollectibles?.data || {}).length;
+    const hashes = await getOwnedEmblemItemHashes(profile);
+    res.json({
+      membershipType: mem.membershipType,
+      membershipId: mem.membershipId,
+      profileCollectibles: pCount,
+      characters: cCount,
+      emblemCount: hashes.length,
+      firstHashes: hashes.slice(0, 10)
+    });
+  } catch (e) {
+    res.status(500).send("debug error");
+  }
 });
 
-process.on("SIGTERM", async () => {
-  if (browser) await browser.close();
-  process.exit(0);
-});
+// ---------------- UI ----------------
+app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-app.listen(PORT, () => {
-  console.log(`Listening on ${PORT}`);
-});
+process.on("SIGTERM", async () => { try { if (browser) await browser.close(); } catch {} process.exit(0); });
+
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
