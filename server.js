@@ -102,7 +102,7 @@ async function getProfile(sid, membershipType, membershipId) {
   return r.data?.Response;
 }
 
-// ---- Per-entity manifest fetch (low memory) ----
+// ---- Per-entity manifest fetch ----
 const entityCache = new Map(); // key: `${type}:${hash}`
 async function getEntity(entityType, hash) {
   const key = `${entityType}:${hash}`;
@@ -145,7 +145,7 @@ async function getOwnedEmblemItemHashes(profile) {
   return [...new Set(itemHashes)];
 }
 
-// --------------- Playwright rarity (light.gg) ---------------
+// --------------- Playwright rarity (lazy) ---------------
 const RARITY_CACHE_FILE = path.join(process.cwd(), "rarity-cache.json");
 const rarityCache = new Map();
 try {
@@ -162,65 +162,61 @@ function persistRarity() {
 let browser, page;
 let q = [];
 let working = false;
+const CONCURRENCY = 4; // allow small parallelism for speed
 
 async function ensureBrowser() {
   if (!browser) {
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] });
-    page = await browser.newPage({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
-    });
   }
 }
 
-function extractFromHTML(html) {
-  const patterns = [
-    /Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i,
-    /Found by\s+(\d{1,3}(?:\.\d+)?)/i,
-    /Community Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i
-  ];
-  for (const re of patterns) {
-    const m = html.match(re);
-    if (m) return parseFloat(m[1]);
-  }
-  const text = html.replace(/<[^>]*>/g, " ");
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (m) return parseFloat(m[1]);
-  }
-  return null;
-}
-
-async function fetchLightGGRarityBrowser(itemHash) {
+// worker pool
+async function rarityWorker() {
   await ensureBrowser();
-  const url = `https://www.light.gg/db/items/${itemHash}/`;
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(400);
-    const html = await page.content();
-    const pct = extractFromHTML(html);
-    return { percent: pct, source: url, label: "light.gg Community" };
-  } catch (e) {
-    return { percent: null, source: url, label: "light.gg" };
+  const ctx = await browser.newContext({ userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36" });
+  const pg = await ctx.newPage();
+  while (true) {
+    const job = q.shift();
+    if (!job) break;
+    const url = `https://www.light.gg/db/items/${job.itemHash}/`;
+    let result = { percent: null, source: url, label: "light.gg" };
+    try {
+      await pg.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await pg.waitForTimeout(300);
+      const html = await pg.content();
+      const patterns = [
+        /Community Rarity[\s\S]{0,200}?Found by\s+(\d{1,3}(?:\.\d+)?)/i,
+        /Found by\s+(\d{1,3}(?:\.\d+)?)/i,
+        /Community Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i
+      ];
+      let pct = null;
+      for (const re of patterns) { const m = html.match(re); if (m) { pct = parseFloat(m[1]); break; } }
+      if (pct == null) {
+        const text = html.replace(/<[^>]*>/g, " ");
+        for (const re of patterns) { const m = text.match(re); if (m) { pct = parseFloat(m[1]); break; } }
+      }
+      result = { percent: pct, source: url, label: "light.gg Community" };
+    } catch {}
+    rarityCache.set(job.itemHash, result);
+    persistRarity();
+    job.resolve(result);
+    await new Promise(r => setTimeout(r, 150)); // polite delay
   }
+  await pg.close();
+  await ctx.close();
+}
+
+async function ensurePump() {
+  if (working) return;
+  working = true;
+  const workers = Array.from({length: CONCURRENCY}, () => rarityWorker());
+  await Promise.all(workers);
+  working = false;
 }
 
 async function fetchRarity(itemHash) {
   if (rarityCache.has(itemHash)) return rarityCache.get(itemHash);
-  return new Promise((resolve) => { q.push({ itemHash, resolve }); pump(); });
-}
-
-async function pump() {
-  if (working) return;
-  working = true;
-  while (q.length) {
-    const job = q.shift();
-    const res = await fetchLightGGRarityBrowser(job.itemHash);
-    rarityCache.set(job.itemHash, res);
-    persistRarity();
-    await new Promise(r => setTimeout(r, 300)); // polite delay
-    job.resolve(res);
-  }
-  working = false;
+  return new Promise((resolve) => { q.push({ itemHash, resolve }); ensurePump(); });
 }
 
 // ---------------- API ----------------
@@ -233,39 +229,40 @@ app.get("/api/emblems", async (req, res) => {
     const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
 
     const hashes = await getOwnedEmblemItemHashes(profile);
-    if (!hashes.length) return res.json({ emblems: [] });
-
-    const rows = [];
+    const items = [];
     for (const h of hashes) {
       const item = await getEntity("DestinyInventoryItemDefinition", h);
       const name = item?.displayProperties?.name || `Item ${h}`;
       const icon = item?.secondaryIcon || item?.displayProperties?.icon || null;
       const img = icon ? `https://www.bungie.net${icon}` : null;
-      const rarity = await fetchRarity(h);
-      rows.push({
-        itemHash: h,
-        name,
-        image: img,
-        rarityPercent: rarity.percent,
-        rarityLabel: rarity.label,
-        sourceUrl: rarity.source
-      });
+      items.push({ itemHash: h, name, image: img });
     }
 
-    rows.sort((a, b) => {
-      const aa = a.rarityPercent == null ? 999999 : a.rarityPercent;
-      const bb = b.rarityPercent == null ? 999999 : b.rarityPercent;
-      return aa - bb;
-    });
+    // Kick off a pre-warm on the first 24 items (does not block response)
+    (async () => {
+      for (const h of hashes.slice(0,24)) { try { await fetchRarity(h); } catch {} }
+    })();
 
-    res.json({ emblems: rows });
+    res.json({ emblems: items });
   } catch (e) {
     console.error("API error:", e);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-// Debug route to verify data flow
+// Lazy rarity endpoint
+app.get("/api/rarity", async (req, res) => {
+  try {
+    const hash = Number(req.query.hash);
+    if (!hash) return res.status(400).json({ error: "hash required" });
+    const r = await fetchRarity(hash);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: "rarity error" });
+  }
+});
+
+// Debug route
 app.get("/debug", async (req, res) => {
   try {
     const sid = req.query.sid;
@@ -275,20 +272,13 @@ app.get("/debug", async (req, res) => {
     const pCount = Object.keys(profile?.profileCollectibles?.data?.collectibles || {}).length;
     const cCount = Object.keys(profile?.characterCollectibles?.data || {}).length;
     const hashes = await getOwnedEmblemItemHashes(profile);
-    res.json({
-      membershipType: mem.membershipType,
-      membershipId: mem.membershipId,
-      profileCollectibles: pCount,
-      characters: cCount,
-      emblemCount: hashes.length,
-      firstHashes: hashes.slice(0, 10)
-    });
+    res.json({ membershipType: mem.membershipType, membershipId: mem.membershipId, profileCollectibles: pCount, characters: cCount, emblemCount: hashes.length, firstHashes: hashes.slice(0, 10) });
   } catch (e) {
     res.status(500).send("debug error");
   }
 });
 
-// ---------------- UI ----------------
+// UI
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 process.on("SIGTERM", async () => { try { if (browser) await browser.close(); } catch {} process.exit(0); });

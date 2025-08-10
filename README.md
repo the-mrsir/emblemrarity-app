@@ -1,21 +1,17 @@
-# Emblem Rarity v4
+# Emblem Rarity v5 — Fast load
 
-- Per-entity Bungie manifest lookups (no giant JSON files) — fixes OOM
-- Playwright headless Chromium to extract light.gg Community Rarity
-- Disk + memory cache for rarity (rarity-cache.json)
-- Debug route: `/debug?sid=...`
+Key changes:
+- Immediate emblem grid (no waiting on rarity).
+- **Lazy rarity**: client fetches `/api/rarity?hash=` for cards as they scroll into view.
+- Playwright browser is reused with a small worker pool (concurrency=4).
+- Server pre-warms rarity for the first 24 hashes in the background.
+- Per-entity Bungie lookups (low memory) + disk cache for rarity.
 
-## Railway
-Set env vars:
-- BASE_URL = https://emblemrarity.app
-- BUNGIE_API_KEY = your key
-- BUNGIE_CLIENT_ID = your id
-- BUNGIE_CLIENT_SECRET = your secret
-- NODE_OPTIONS = --max-old-space-size=1024  (optional safety margin)
+Railway tips:
+- Optional: `NODE_OPTIONS=--max-old-space-size=1024`
+- Make sure postinstall runs Playwright: it's in package.json.
 
-Build: postinstall installs Playwright + deps automatically.
-
-## Test
-- Visit `/login`, finish OAuth.
-- After redirect to `/?sid=...`, open `/debug?sid=...` once to verify emblemCount > 0.
-- Go back to home and check the grid.
+Flow:
+1) `/login` → OAuth → redirect `/?sid=...`
+2) Client calls `/api/emblems?sid=...` → gets names + images instantly.
+3) As you scroll, client calls `/api/rarity?hash=...` and fills in percentages.

@@ -68,6 +68,24 @@ let data = [];
 let filtered = [];
 let threshold = null;
 
+// intersection observer to lazy-fetch rarity when card becomes visible
+const io = new IntersectionObserver((entries) => {
+  entries.forEach(async (entry) => {
+    if (!entry.isIntersecting) return;
+    const card = entry.target;
+    const hash = card.dataset.hash;
+    if (!hash || card.dataset.loaded) return;
+    card.dataset.loaded = "1";
+    try {
+      const r = await fetch(`/api/rarity?hash=${encodeURIComponent(hash)}`).then(r => r.json());
+      const badge = card.querySelector(".badge");
+      const pct = (r && r.percent != null) ? (Number(r.percent).toFixed(4) + "%") : "Unknown";
+      badge.textContent = `${badge.textContent.split("•")[0]}• ${pct}`;
+      card.querySelector(".meta .label").textContent = r?.label || "";
+    } catch {}
+  });
+}, { rootMargin: "200px" });
+
 function renderSkeleton(n=10){ grid.innerHTML=""; for(let i=0;i<n;i++){ const s=document.createElement("div"); s.className="skeleton"; grid.appendChild(s);} }
 
 function render() {
@@ -88,15 +106,14 @@ function render() {
 
   const frag = document.createDocumentFragment();
   filtered.forEach((e, i) => {
-    const card = document.createElement("div"); card.className="card";
+    const card = document.createElement("div"); card.className="card"; card.dataset.hash = e.itemHash;
     const imgwrap = document.createElement("div"); imgwrap.className="imgwrap";
     const img = document.createElement("img"); img.loading="lazy"; img.src=e.image||""; img.alt=e.name;
     const badge = document.createElement("div"); badge.className="badge";
-    const pct = e.rarityPercent == null ? "Unknown" : e.rarityPercent.toFixed(4) + "%";
-    badge.textContent = `#${i+1} • ${pct}`;
+    badge.textContent = `#${i+1} • ...`; // filled on visibility
     imgwrap.append(img, badge);
     const title = document.createElement("h3"); title.textContent = e.name;
-    const meta = document.createElement("div"); meta.className="meta"; meta.innerHTML = `<span>${e.rarityLabel||""}</span><span>${e.itemHash}</span>`;
+    const meta = document.createElement("div"); meta.className="meta"; meta.innerHTML = `<span class="label"></span><span>${e.itemHash}</span>`;
     const links = document.createElement("div"); links.className="links";
     const lg = document.createElement("a"); lg.href=`https://www.light.gg/db/items/${e.itemHash}/`; lg.target="_blank"; lg.rel="noopener"; lg.textContent="light.gg";
     links.append(lg);
@@ -104,6 +121,9 @@ function render() {
     frag.appendChild(card);
   });
   grid.appendChild(frag);
+
+  // observe new cards
+  document.querySelectorAll(".card").forEach(c => io.observe(c));
 }
 
 chips.forEach(ch => {
@@ -118,7 +138,7 @@ chips.forEach(ch => {
 
 if (sid) {
   loginBtn.style.display = "none";
-  statusEl.textContent = "Fetching your emblems and rarity...";
+  statusEl.textContent = "Fetching your emblems...";
   renderSkeleton(12);
   fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`)
     .then(r => r.json())
