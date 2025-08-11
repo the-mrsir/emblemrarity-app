@@ -188,7 +188,19 @@ const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE
 const getSyncStatus = db.prepare("SELECT last_sync_date, last_sync_timestamp, total_emblems, sync_status FROM daily_sync_status WHERE id = 1");
 const updateSyncStatus = db.prepare("UPDATE daily_sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
 
-// ---------------- Daily Sync System ----------------
+// ---------------- Rarity (ONE SYSTEM ONLY) ----------------
+async function getRarityCached(itemHash){
+  // ONLY check database - NO scraping, NO sync triggering
+  const row = getRarity.get(itemHash);
+  if (row && row.percent !== null) {
+    return { percent: row.percent, label: row.label, source: row.source, updatedAt: row.updatedAt };
+  }
+  
+  // If no data, return null - let the daily sync handle it
+  return { percent: null, label: "light.gg", source: `https://www.light.gg/db/items/${itemHash}/`, updatedAt: null };
+}
+
+// ---------------- Daily Sync System (THE ONLY SYNC) ----------------
 function isToday(dateString) {
   const today = new Date().toISOString().split('T')[0];
   return dateString === today;
@@ -225,6 +237,12 @@ function updateSyncProgress(update) {
 }
 
 async function performDailySync() {
+  // Prevent multiple syncs from running
+  if (syncProgress.isRunning) {
+    log.info("Daily sync already running, skipping");
+    return;
+  }
+
   const today = new Date().toISOString().split('T')[0];
   const now = Math.floor(Date.now() / 1000);
   
@@ -567,13 +585,29 @@ function writeSnapshotSafe(){
 app.get("/api/sync/status", (req, res) => {
   try {
     const status = getSyncStatus.get();
+    const { nulls, nonnull } = countRarity.get() || {};
+    
+    // Calculate what needs to happen
+    const needsSync = status ? !isToday(status.last_sync_date) : true;
+    const hasData = (nonnull || 0) > 0;
+    const syncState = status?.sync_status || "pending";
+    
     res.json({
       last_sync_date: status?.last_sync_date || null,
       last_sync_timestamp: status?.last_sync_timestamp || 0,
       total_emblems: status?.total_emblems || 0,
-      sync_status: status?.sync_status || "pending",
-      should_sync_today: status ? !isToday(status.last_sync_date) : true,
-      progress: syncProgress // Include current progress state
+      sync_status: syncState,
+      should_sync_today: needsSync,
+      has_rarity_data: hasData,
+      rarity_stats: {
+        with_data: nonnull || 0,
+        without_data: nulls || 0
+      },
+      progress: syncProgress,
+      next_action: needsSync ? "trigger_sync" : "wait_for_tomorrow",
+      message: needsSync 
+        ? "Data needs to be synced today. Use admin panel to trigger sync."
+        : "Data is current. Next sync will be tomorrow."
     });
   } catch (e) {
     log.error({ error: e.message }, "Failed to get sync status");
@@ -592,6 +626,10 @@ app.get("/api/sync/progress", (req, res) => {
 
 app.post("/api/sync/trigger", async (req, res) => {
   try {
+    if (syncProgress.isRunning) {
+      return res.json({ message: "Sync already running", status: "already_running" });
+    }
+    
     if (await shouldSyncToday()) {
       // Start sync in background
       performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
@@ -655,7 +693,7 @@ app.get("/api/emblems", async (req, res) => {
           if (row){
             if (nm) row.name = nm;
             if (ic) row.image = `https://www.bungie.net${ic}`;
-          }
+           }
         }
       }catch(e){
         log.warn({ itemHash: h, error: e.message }, "Failed to resolve missing emblem data");
@@ -665,12 +703,7 @@ app.get("/api/emblems", async (req, res) => {
     // sort by rarity
     rows.sort((a,b)=> (a.rarityPercent ?? 9e9) - (b.rarityPercent ?? 9e9));
     
-    // Check if we need to trigger daily sync
-    if (await shouldSyncToday()) {
-      log.info("Triggering daily sync for missing rarity data");
-      performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
-    }
-
+    // NO MORE SYNC TRIGGERING - let the daily sync handle it
     log.info({ sid: sid.substring(0, 8) + "...", finalCount: rows.length }, "Sending emblem response");
     res.json({ emblems: rows });
   }catch(e){ 
@@ -733,11 +766,9 @@ async function checkStartupSync() {
     log.info("Checking if startup sync is needed...");
     
     if (await shouldSyncToday()) {
-      log.info("Startup sync needed, triggering daily sync");
-      // Delay startup sync to avoid blocking server startup
-      setTimeout(() => {
-        performDailySync().catch(e => log.error({ error: e.message, stack: e.stack }, "Startup sync failed"));
-      }, 10000); // Wait 10 seconds after startup
+      log.info("Startup sync needed, but will wait for manual trigger or cron");
+      // Don't auto-start sync - let admin or cron handle it
+      log.info("Use admin panel to trigger sync or wait for scheduled cron");
     } else {
       log.info("No startup sync needed, data is current");
     }
@@ -821,7 +852,7 @@ app.listen(PORT, async () => {
     await launchBrowser();
     log.info(`Listening on ${PORT}`);
     
-    // Check if we need to sync on startup
+    // Check startup status but don't auto-start sync
     setTimeout(checkStartupSync, 5000); // Wait 5 seconds after startup
   } catch (error) {
     log.error({ error: error.message, stack: error.stack }, "Failed to start server");

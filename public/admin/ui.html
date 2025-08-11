@@ -234,6 +234,44 @@
             font-size: 14px;
             line-height: 1.4;
         }
+        .action-banner {
+            background: #fff3cd;
+            border: 1px solid #ffeeba;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 20px 0;
+            display: none;
+            align-items: center;
+            gap: 15px;
+            color: #856404;
+        }
+        .action-banner.urgent {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .banner-content {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+        }
+        .banner-icon {
+            font-size: 24px;
+        }
+        .banner-text h4 {
+            margin: 0 0 5px 0;
+            color: inherit;
+        }
+        .banner-text p {
+            margin: 0;
+            font-size: 14px;
+            color: inherit;
+        }
+        .banner-actions {
+            display: flex;
+            gap: 10px;
+        }
     </style>
 </head>
 <body>
@@ -264,14 +302,26 @@
                 <div class="subtitle">Current sync operation status</div>
             </div>
             <div class="status-card">
-                <h3>Total Emblems</h3>
-                <div class="value" id="totalEmblems">-</div>
+                <h3>Rarity Data</h3>
+                <div class="value" id="rarityData">-</div>
                 <div class="subtitle">Emblems with rarity data</div>
             </div>
             <div class="status-card">
-                <h3>Should Sync Today</h3>
-                <div class="value" id="shouldSyncToday">-</div>
-                <div class="subtitle">Whether sync is needed today</div>
+                <h3>Next Action</h3>
+                <div class="value" id="nextAction">-</div>
+                <div class="subtitle">What needs to happen next</div>
+            </div>
+        </div>
+
+        <!-- Action Required Banner -->
+        <div id="actionBanner" class="action-banner" style="display: none;">
+            <div class="banner-content">
+                <div class="banner-icon">⚠️</div>
+                <div class="banner-text">
+                    <h4>Action Required</h4>
+                    <p id="bannerMessage">Daily sync needs to be triggered to get emblem rarity data.</p>
+                </div>
+                <button id="bannerTriggerSync" class="btn btn-primary">Trigger Sync Now</button>
             </div>
         </div>
 
@@ -323,7 +373,7 @@
         <button id="refreshBtn" class="refresh-btn" title="Refresh all data">🔄</button>
     </div>
 
-    <script>
+<script>
         let isRefreshing = false;
         let progressInterval = null;
 
@@ -424,15 +474,29 @@
             syncStatusEl.textContent = status.sync_status || 'pending';
             syncStatusEl.className = `sync-status ${status.sync_status || 'pending'}`;
             
-            document.getElementById('totalEmblems').textContent = 
-                status.total_emblems || 0;
+            document.getElementById('rarityData').textContent = 
+                `${status.rarity_stats?.with_data || 0} / ${(status.rarity_stats?.with_data || 0) + (status.rarity_stats?.without_data || 0)}`;
             
-            document.getElementById('shouldSyncToday').textContent = 
-                status.should_sync_today ? 'Yes' : 'No';
+            document.getElementById('nextAction').textContent = 
+                status.next_action === 'trigger_sync' ? 'Sync Needed' : 'No Action Required';
 
             // Update progress display if available
             if (status.progress) {
                 updateProgressDisplay(status.progress);
+            }
+
+            // Show/hide action banner
+            const actionBanner = document.getElementById('actionBanner');
+            if (status.should_sync_today && !status.progress.isRunning) {
+                actionBanner.style.display = 'flex';
+                actionBanner.className = 'action-banner urgent';
+                document.getElementById('bannerMessage').textContent = status.message || 'Daily sync needs to be triggered to get emblem rarity data.';
+            } else if (status.progress.isRunning) {
+                actionBanner.style.display = 'flex';
+                actionBanner.className = 'action-banner';
+                document.getElementById('bannerMessage').textContent = 'Sync is currently running. Please wait for completion.';
+            } else {
+                actionBanner.style.display = 'none';
             }
         }
 
@@ -538,6 +602,7 @@
             updateStatusDisplay();
             addLogEntry('Status refreshed manually', 'info');
         });
+        document.getElementById('bannerTriggerSync').addEventListener('click', triggerDailySync);
 
         // Initial load
         updateStatusDisplay();
@@ -545,6 +610,6 @@
 
         // Auto-refresh every 30 seconds
         setInterval(updateStatusDisplay, 30000);
-    </script>
+</script>
 </body>
 </html>

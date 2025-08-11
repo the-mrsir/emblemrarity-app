@@ -6,6 +6,7 @@
     "start": "node server.js",
     "populate-catalog": "node populate_catalog.js",
     "debug": "node debug.js",
+    "test": "node test-system.js",
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
