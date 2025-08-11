@@ -210,7 +210,24 @@ function isToday(dateString) {
 
 async function shouldSyncToday() {
   const status = getSyncStatus.get();
+  
+  // If no status or never synced, always sync
   if (!status || !status.last_sync_date) return true;
+  
+  // If no emblems in catalog, need to populate first
+  const catalogCount = listCatalog.all().length;
+  if (catalogCount === 0) {
+    log.warn("No emblems in catalog - populate catalog first");
+    return false;
+  }
+  
+  // If total_emblems is 0 but catalog has emblems, something is wrong - resync
+  if (status.total_emblems === 0 && catalogCount > 0) {
+    log.info(`Catalog has ${catalogCount} emblems but sync shows 0 - forcing resync`);
+    return true;
+  }
+  
+  // Check if we already synced today
   return !isToday(status.last_sync_date);
 }
 
@@ -568,20 +585,30 @@ function writeSnapshotSafe(){
 }
 
 // ---------------- Daily Sync Endpoints ----------------
-app.get("/api/sync/status", (req, res) => {
+app.get("/api/sync/status", async (req, res) => {
   try {
     const status = getSyncStatus.get();
     const { nulls, nonnull } = countRarity.get() || {};
+    const catalogCount = listCatalog.all().length;
     
-    // Calculate what needs to happen
-    const needsSync = status ? !isToday(status.last_sync_date) : true;
+    // Calculate what needs to happen (use async function)
+    const needsSync = await shouldSyncToday();
     const hasData = (nonnull || 0) > 0;
     const syncState = status?.sync_status || "pending";
+    
+    // Check for corrupted state
+    let warningMessage = null;
+    if (catalogCount === 0) {
+      warningMessage = "No emblems in catalog. Run: npm run populate-catalog --force";
+    } else if (status?.total_emblems === 0 && catalogCount > 0) {
+      warningMessage = `Catalog has ${catalogCount} emblems but sync shows 0. System needs reset.`;
+    }
     
     res.json({
       last_sync_date: status?.last_sync_date || null,
       last_sync_timestamp: status?.last_sync_timestamp || 0,
       total_emblems: status?.total_emblems || 0,
+      catalog_emblems: catalogCount,
       sync_status: syncState,
       should_sync_today: needsSync,
       has_rarity_data: hasData,
@@ -591,9 +618,10 @@ app.get("/api/sync/status", (req, res) => {
       },
       progress: syncProgress,
       next_action: needsSync ? "trigger_sync" : "wait_for_tomorrow",
-      message: needsSync 
+      message: warningMessage || (needsSync 
         ? "Data needs to be synced today. Use admin panel to trigger sync."
-        : "Data is current. Next sync will be tomorrow."
+        : "Data is current. Next sync will be tomorrow."),
+      warning: warningMessage
     });
   } catch (e) {
     log.error({ error: e.message }, "Failed to get sync status");

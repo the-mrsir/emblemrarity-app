@@ -8,6 +8,7 @@
     "debug": "node debug.js",
     "test": "node test-system.js",
     "check-db": "node check-db.js",
+    "reset": "node reset-system.js",
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
