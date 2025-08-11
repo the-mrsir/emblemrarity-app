@@ -68,6 +68,71 @@
         .sync-status.in_progress { background: #cce5ff; color: #004085; }
         .sync-status.completed { background: #d4edda; color: #155724; }
         .sync-status.failed { background: #f8d7da; color: #721c24; }
+        
+        .progress-section {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .progress-section.active {
+            display: block;
+        }
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .progress-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #495057;
+        }
+        .progress-percentage {
+            font-size: 18px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .progress-bar-container {
+            background: #e9ecef;
+            border-radius: 10px;
+            height: 20px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        .progress-bar {
+            background: linear-gradient(90deg, #007bff, #0056b3);
+            height: 100%;
+            border-radius: 10px;
+            transition: width 0.3s ease;
+            position: relative;
+        }
+        .progress-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            font-size: 13px;
+        }
+        .progress-detail {
+            background: white;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #dee2e6;
+        }
+        .progress-detail .label {
+            color: #6c757d;
+            font-size: 11px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .progress-detail .value {
+            color: #212529;
+            font-weight: 600;
+        }
+        
         .actions {
             display: flex;
             gap: 15px;
@@ -93,11 +158,6 @@
             color: white;
         }
         .btn-secondary:hover { background: #545b62; }
-        .btn-danger {
-            background: #dc3545;
-            color: white;
-        }
-        .btn-danger:hover { background: #c82333; }
         .btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
@@ -157,6 +217,23 @@
         .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .alert-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         .alert-info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .info-box {
+            background: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 6px;
+            padding: 16px;
+            margin-bottom: 20px;
+            color: #004085;
+        }
+        .info-box h4 {
+            margin: 0 0 8px 0;
+            color: #004085;
+        }
+        .info-box p {
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
@@ -167,6 +244,11 @@
         </div>
 
         <div id="alert" class="alert"></div>
+
+        <div class="info-box">
+            <h4>🚀 Daily Sync System Active</h4>
+            <p>This system automatically syncs emblem rarity data once per day. All user requests now get instant responses from the local database. No more real-time scraping needed!</p>
+        </div>
 
         <div class="status-grid">
             <div class="status-card">
@@ -193,6 +275,35 @@
             </div>
         </div>
 
+        <!-- Progress Section -->
+        <div id="progressSection" class="progress-section">
+            <div class="progress-header">
+                <div class="progress-title">🔄 Sync Progress</div>
+                <div class="progress-percentage" id="progressPercentage">0%</div>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+            </div>
+            <div class="progress-details">
+                <div class="progress-detail">
+                    <div class="label">Current Emblem</div>
+                    <div class="value" id="currentEmblem">-</div>
+                </div>
+                <div class="progress-detail">
+                    <div class="label">Batch Progress</div>
+                    <div class="value" id="batchProgress">-</div>
+                </div>
+                <div class="progress-detail">
+                    <div class="label">Time Elapsed</div>
+                    <div class="value" id="timeElapsed">-</div>
+                </div>
+                <div class="progress-detail">
+                    <div class="label">Est. Time Remaining</div>
+                    <div class="value" id="timeRemaining">-</div>
+                </div>
+            </div>
+        </div>
+
         <div class="actions">
             <button id="triggerSync" class="btn btn-primary">Trigger Daily Sync</button>
             <button id="refreshStatus" class="btn btn-secondary">Refresh Status</button>
@@ -214,6 +325,7 @@
 
     <script>
         let isRefreshing = false;
+        let progressInterval = null;
 
         function showAlert(message, type = 'info') {
             const alert = document.getElementById('alert');
@@ -233,6 +345,50 @@
             document.getElementById('writeSnapshot').disabled = loading;
         }
 
+        function formatTime(seconds) {
+            if (!seconds || seconds < 0) return '-';
+            if (seconds < 60) return `${seconds}s`;
+            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+            const hours = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            return `${hours}h ${mins}m`;
+        }
+
+        function updateProgressDisplay(progress) {
+            const progressSection = document.getElementById('progressSection');
+            const progressBar = document.getElementById('progressBar');
+            const progressPercentage = document.getElementById('progressPercentage');
+            const currentEmblem = document.getElementById('currentEmblem');
+            const batchProgress = document.getElementById('batchProgress');
+            const timeElapsed = document.getElementById('timeElapsed');
+            const timeRemaining = document.getElementById('timeRemaining');
+
+            if (progress.isRunning) {
+                progressSection.classList.add('active');
+                
+                // Update progress bar
+                const percent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+                progressBar.style.width = `${percent}%`;
+                progressPercentage.textContent = `${percent}%`;
+                
+                // Update details
+                currentEmblem.textContent = progress.currentEmblem || '-';
+                batchProgress.textContent = progress.currentBatch > 0 ? `${progress.currentBatch}/${progress.totalBatches}` : '-';
+                
+                // Calculate time elapsed
+                if (progress.startTime) {
+                    const elapsed = Math.round((Date.now() - progress.startTime) / 1000);
+                    timeElapsed.textContent = formatTime(elapsed);
+                }
+                
+                // Show estimated time remaining
+                timeRemaining.textContent = formatTime(progress.estimatedTimeRemaining);
+                
+            } else {
+                progressSection.classList.remove('active');
+            }
+        }
+
         async function fetchSyncStatus() {
             try {
                 const response = await fetch('/api/sync/status');
@@ -241,6 +397,17 @@
             } catch (error) {
                 console.error('Error fetching sync status:', error);
                 showAlert('Failed to fetch sync status', 'error');
+                return null;
+            }
+        }
+
+        async function fetchSyncProgress() {
+            try {
+                const response = await fetch('/api/sync/progress');
+                if (!response.ok) throw new Error('Failed to fetch sync progress');
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching sync progress:', error);
                 return null;
             }
         }
@@ -262,6 +429,33 @@
             
             document.getElementById('shouldSyncToday').textContent = 
                 status.should_sync_today ? 'Yes' : 'No';
+
+            // Update progress display if available
+            if (status.progress) {
+                updateProgressDisplay(status.progress);
+            }
+        }
+
+        async function startProgressMonitoring() {
+            // Clear any existing interval
+            if (progressInterval) {
+                clearInterval(progressInterval);
+            }
+
+            // Start monitoring progress every 2 seconds during sync
+            progressInterval = setInterval(async () => {
+                const progress = await fetchSyncProgress();
+                if (progress && progress.isRunning) {
+                    updateProgressDisplay(progress);
+                } else if (progress && !progress.isRunning) {
+                    // Sync finished, stop monitoring
+                    clearInterval(progressInterval);
+                    progressInterval = null;
+                    updateProgressDisplay(progress);
+                    // Refresh status to show completion
+                    setTimeout(updateStatusDisplay, 1000);
+                }
+            }, 2000);
         }
 
         async function triggerDailySync() {
@@ -274,6 +468,8 @@
                 
                 if (response.ok) {
                     showAlert(result.message, 'success');
+                    // Start monitoring progress
+                    startProgressMonitoring();
                     // Wait a bit then refresh status
                     setTimeout(updateStatusDisplay, 2000);
                 } else {

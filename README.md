@@ -1,72 +1,65 @@
-# Emblem Rarity App - Daily Sync System
+# Emblem Rarity App v10.1.0
 
-A Destiny 2 emblem rarity tracker that efficiently syncs emblem rarity data once per day and provides fast database lookups.
+A high-performance Destiny 2 emblem rarity tracker that automatically syncs emblem data daily and provides instant database lookups for the fastest possible user experience.
 
-## 🚀 New Daily Sync System
+## 🚀 What's New in v10.1.0
 
-This app now uses a **database-first approach** that:
-- **Pulls emblem rarity data once per day** (configurable via cron)
-- **Stores data permanently** in SQLite for instant lookups
-- **Automatically checks** if today's sync is needed
-- **Processes data in batches** to avoid overwhelming external APIs
-- **Provides real-time status monitoring** via admin interface
+### Enhanced Stability & Error Handling
+- **Comprehensive error handling** throughout the application
+- **Timeout protection** for all async operations (browser launch, scraping, batch processing)
+- **Graceful shutdown** handling for clean process termination
+- **Uncaught exception handling** to prevent server crashes
+- **Memory monitoring** and usage tracking
+- **Better process management** and crash prevention
+
+### Debugging & Monitoring Tools
+- **Health check endpoints** (`/health`, `/health/detailed`) for real-time monitoring
+- **Debug script** (`npm run debug`) for troubleshooting connection issues
+- **Enhanced logging** with stack traces and detailed error information
+- **Progress tracking** improvements with better error recovery
+- **Railway-specific diagnostics** for deployment troubleshooting
+
+### Performance Improvements
+- **Batch processing timeouts** (5 minutes per batch) to prevent stuck operations
+- **Individual emblem scraping timeouts** (60 seconds) for better resource management
+- **Improved startup sequence** with delayed sync to avoid blocking server startup
+- **Better concurrency control** with error recovery
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Bungie API   │    │  Light.gg API   │    │   SQLite DB     │
-│   (Emblem List)│    │  (Rarity Data)  │    │  (Permanent)    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Catalog Sync  │    │  Daily Rarity   │    │  Fast Lookups   │
-│  (One-time)    │    │  Sync (Daily)   │    │  (Instant)      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
+This application uses a **database-first approach** that prioritizes local lookups over real-time external API calls:
 
-## 📋 Setup Instructions
+- **Daily Sync System**: Pulls all emblem rarity data once per day and stores it in a local SQLite database
+- **Instant Responses**: User requests get immediate responses from the local database
+- **Background Updates**: Data refresh happens automatically without blocking user requests
+- **Smart Caching**: Only syncs when needed (once per day) to minimize external API usage
 
-### 1. Environment Variables
+## 🛠️ Setup Instructions
 
-Create a `.env` file with:
-
+### Environment Variables
 ```bash
-# Required
+BASE_URL=https://your-app.railway.app
 BUNGIE_API_KEY=your_bungie_api_key
 BUNGIE_CLIENT_ID=your_bungie_client_id
 BUNGIE_CLIENT_SECRET=your_bungie_client_secret
-BASE_URL=http://localhost:3000
-
-# Optional
-PORT=3000
-CRON_ENABLED=true
-REFRESH_CRON="0 3 * * *"  # 3 AM daily
-CRON_TZ=America/New_York
 ADMIN_KEY=your_admin_key
+CRON_ENABLED=true
+REFRESH_CRON=0 3 * * *  # 3 AM daily
+CRON_TZ=America/New_York
 ```
 
-### 2. Install Dependencies
-
+### Installation
 ```bash
 npm install
+npm run postinstall  # Installs Playwright browser
 ```
 
-### 3. Populate Emblem Catalog (One-time Setup)
-
+### Populate Catalog (First Time Only)
 ```bash
 npm run populate-catalog
 ```
 
-This script:
-- Downloads the Destiny 2 manifest
-- Extracts all emblem definitions
-- Populates the local database
-- Sets up the sync system
-
-### 4. Start the Server
-
+### Start Server
 ```bash
 npm start
 ```
@@ -74,166 +67,204 @@ npm start
 ## 🔄 Daily Sync Process
 
 ### Automatic Sync
-- **Cron-based**: Runs daily at 3 AM (configurable)
-- **Startup check**: Automatically syncs if needed on server restart
-- **Smart detection**: Only syncs if today's data is missing
+- **Startup Check**: Automatically checks if sync is needed when server starts
+- **Cron Schedule**: Runs daily at 3 AM (configurable)
+- **Smart Detection**: Only syncs if data hasn't been refreshed today
 
 ### Manual Sync
-- **Admin interface**: `/admin/ui.html`
-- **API endpoint**: `POST /api/sync/trigger`
-- **Admin command**: `POST /admin/sync`
+- **Admin Panel**: Use `/admin/ui.html` to trigger manual syncs
+- **API Endpoint**: `POST /api/sync/trigger` to start sync programmatically
+- **Status Monitoring**: Real-time progress tracking with percentage and time estimates
 
 ### Sync Status
-- **Pending**: No sync has been performed
-- **In Progress**: Sync is currently running
-- **Completed**: Sync finished successfully
-- **Failed**: Sync encountered an error
+- **pending**: No sync has been performed yet
+- **in_progress**: Currently syncing emblem data
+- **completed**: Successfully synced today
+- **failed**: Last sync attempt failed
 
-## 📊 Database Schema
+## 🗄️ Database Schema
 
-### `emblem_catalog`
 ```sql
-CREATE TABLE emblem_catalog (
-  itemHash INTEGER PRIMARY KEY,
-  name TEXT,
-  icon TEXT
-);
+-- Emblem catalog (names, icons)
+emblem_catalog (itemHash, name, icon)
+
+-- Rarity data cache
+rarity_cache (itemHash, percent, label, source, updatedAt)
+
+-- Daily sync tracking
+daily_sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status)
+
+-- Collectible mappings
+collectible_item (collectibleHash, itemHash)
 ```
 
-### `rarity_cache`
-```sql
-CREATE TABLE rarity_cache (
-  itemHash INTEGER PRIMARY KEY,
-  percent REAL,
-  label TEXT,
-  source TEXT,
-  updatedAt INTEGER
-);
-```
-
-### `daily_sync_status`
-```sql
-CREATE TABLE daily_sync_status (
-  id INTEGER PRIMARY KEY DEFAULT 1,
-  last_sync_date TEXT,
-  last_sync_timestamp INTEGER,
-  total_emblems INTEGER,
-  sync_status TEXT
-);
-```
-
-## 🎯 API Endpoints
+## 🔌 API Endpoints
 
 ### Public Endpoints
-- `GET /api/sync/status` - Get current sync status
-- `POST /api/sync/trigger` - Trigger daily sync (if needed)
-- `GET /api/emblems?sid=<session>` - Get user's emblems with rarity
-- `GET /api/rarity?hash=<itemHash>` - Get rarity for specific emblem
+- `GET /` - Main application page
+- `GET /login` - Bungie OAuth login
+- `GET /oauth/callback` - OAuth callback handler
+- `GET /api/emblems?sid=<token>` - Get user's emblems with rarity
+- `GET /api/rarity?hash=<itemHash>` - Get specific emblem rarity
+- `GET /rarity-snapshot.json` - Public rarity data snapshot
 
 ### Admin Endpoints
-- `GET /admin/ui.html` - Admin interface
-- `POST /admin/sync` - Force daily sync
-- `POST /admin/snapshot` - Write rarity snapshot
+- `GET /admin/ui.html` - Admin dashboard
+- `GET /admin/help` - Admin configuration info
+- `GET /admin/ping` - Admin authentication test
+- `POST /admin/sync` - Trigger manual sync
+- `POST /admin/snapshot` - Write public snapshot
 
-## 🖥️ Admin Interface
+### Health & Monitoring
+- `GET /health` - Basic health check
+- `GET /health/detailed` - Comprehensive system status
+- `GET /api/sync/status` - Current sync status
+- `GET /api/sync/progress` - Real-time sync progress
 
-Access `/admin/ui.html` to:
-- **Monitor sync status** in real-time
+## 🎛️ Admin Interface
+
+Access the admin panel at `/admin/ui.html` to:
+- **Monitor sync status** and progress
 - **Trigger manual syncs** when needed
-- **View sync statistics** and history
-- **Control system operations**
+- **View system health** and performance metrics
+- **Track sync progress** with real-time updates
+- **Manage snapshots** and data exports
 
 ## ⚙️ Configuration
 
-### Cron Schedule
-```bash
-# Examples
-REFRESH_CRON="0 3 * * *"     # 3 AM daily
-REFRESH_CRON="0 */6 * * *"   # Every 6 hours
-REFRESH_CRON="0 2 * * 0"     # 2 AM every Sunday
-```
+### Cron Settings
+- **Default**: Daily at 3 AM Eastern Time
+- **Customizable**: Set `REFRESH_CRON` and `CRON_TZ` environment variables
+- **Timezone Support**: Full timezone support for global deployments
 
-### Concurrency Settings
-```bash
-RARITY_CONCURRENCY=2          # Browser instances
-RARITY_MIN_GAP_MS=200        # Delay between requests
-```
+### Concurrency Control
+- **Bungie API**: 12 concurrent requests (configurable via `BUNGIE_CONCURRENCY`)
+- **Rarity Scraping**: 2 concurrent scrapes (configurable via `RARITY_CONCURRENCY`)
+- **Batch Processing**: 50 emblems per batch with 1-second delays
 
-## 🚀 Performance Benefits
+### Timeout Protection
+- **Browser Launch**: 30 seconds
+- **Emblem Scraping**: 60 seconds per emblem
+- **Batch Processing**: 5 minutes per batch
+- **Health Checks**: 10-15 seconds
+
+## 📊 Performance Benefits
 
 ### Before (Real-time Scraping)
-- ❌ **Slow**: 2-5 seconds per emblem
-- ❌ **Unreliable**: External API rate limits
-- ❌ **Expensive**: Repeated scraping for same data
+- **Response Time**: 2-10 seconds per request
+- **Rate Limiting**: Frequent light.gg rate limit issues
+- **Reliability**: Unpredictable performance
+- **Resource Usage**: High CPU/memory during requests
 
 ### After (Daily Sync + Database)
-- ✅ **Fast**: Instant database lookups
-- ✅ **Reliable**: Data stored locally
-- ✅ **Efficient**: One sync per day
-- ✅ **Scalable**: Handles thousands of emblems
+- **Response Time**: <100ms for most requests
+- **Rate Limiting**: No user-facing rate limit issues
+- **Reliability**: Consistent, predictable performance
+- **Resource Usage**: Low during user requests, high only during daily sync
 
-## 🔍 Monitoring
+## 🔍 Monitoring & Debugging
 
-### Logs
-The system logs all sync activities with structured logging:
-```json
-{"level":30,"time":1703123456789,"msg":"Daily sync completed","total":1250,"success":1248,"processed":1250}
+### Health Checks
+```bash
+# Basic health
+curl https://your-app.railway.app/health
+
+# Detailed status
+curl https://your-app.railway.app/health/detailed
+
+# Sync status
+curl https://your-app.railway.app/api/sync/status
 ```
 
-### Metrics
-- Total emblems in catalog
-- Sync success/failure rates
-- Last sync timestamp
-- Current sync status
+### Debug Tool
+```bash
+# Run comprehensive diagnostics
+npm run debug
 
-## 🛠️ Troubleshooting
+# Check specific endpoints
+curl https://your-app.railway.app/api/sync/progress
+```
+
+### Railway Logs
+Monitor your Railway deployment logs for:
+- Sync progress updates
+- Error messages and stack traces
+- Memory usage patterns
+- Database connection status
+
+## 🚨 Troubleshooting
+
+### Connection Reset Errors
+If you see `ERR_CONNECTION_RESET` errors:
+
+1. **Check Railway logs** for server crashes or errors
+2. **Run debug tool**: `npm run debug`
+3. **Verify health endpoints** are responding
+4. **Check memory usage** in detailed health endpoint
+5. **Restart Railway service** if needed
 
 ### Common Issues
 
-1. **"No emblems found in catalog"**
-   - Run `npm run populate-catalog` first
+#### Server Not Starting
+- Verify all environment variables are set
+- Check Railway logs for startup errors
+- Ensure Playwright browser is installed
 
-2. **"Sync failed"**
-   - Check Bungie API key validity
-   - Verify network connectivity
-   - Check admin interface for details
+#### Sync Stuck or Failing
+- Check `/health/detailed` for sync status
+- Monitor memory usage for potential leaks
+- Verify light.gg is accessible from Railway
 
-3. **"Browser launch failed"**
-   - Ensure Playwright is installed: `npx playwright install chromium`
-   - Check system dependencies
-
-### Debug Mode
-```bash
-LOG_LEVEL=debug npm start
-```
+#### Slow Performance
+- Check if daily sync is running
+- Verify database size and performance
+- Monitor memory usage patterns
 
 ## 📈 Scaling Considerations
 
-- **Database**: SQLite handles thousands of emblems efficiently
-- **Memory**: Minimal memory footprint with streaming processing
-- **Storage**: ~1-2MB for full emblem catalog + rarity data
-- **Concurrency**: Configurable browser instances for parallel processing
+### Memory Management
+- **Browser Management**: Single browser instance with proper cleanup
+- **Database Connections**: Efficient SQLite usage with WAL mode
+- **Token Storage**: In-memory token storage (consider Redis for multi-instance)
 
-## 🔄 Migration from Old System
+### Multi-Instance Deployment
+- **Volume Mounts**: Use Railway volume mounts for persistent data
+- **Database**: Consider PostgreSQL for multi-instance deployments
+- **Load Balancing**: Ensure sticky sessions for OAuth tokens
 
-If upgrading from the previous version:
-1. Backup existing database
-2. Run `npm run populate-catalog --force`
-3. Restart server
-4. Monitor first sync completion
+## 🔄 Migration from Previous Versions
 
-## 📝 License
+### v9.x to v10.1.0
+- **Automatic**: No manual migration required
+- **Database**: Existing data is preserved
+- **New Features**: Daily sync system activates automatically
+- **Admin Interface**: Updated to new system
 
-This project is open source. See LICENSE for details.
+### Breaking Changes
+- **Removed**: Old refresh endpoints (`/refresh-now`, `/admin/refresh`)
+- **Updated**: Admin interface completely redesigned
+- **New**: Daily sync system replaces real-time scraping
+
+## 📄 License
+
+MIT License - see LICENSE file for details.
 
 ## 🤝 Contributing
 
-Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Submit a pull request
+4. Add tests if applicable
+5. Submit a pull request
+
+## 🆘 Support
+
+For issues and questions:
+1. Check the troubleshooting section above
+2. Run the debug tool: `npm run debug`
+3. Check Railway logs for error details
+4. Open an issue with debug output and error details
 
 ---
 
-**Need help?** Check the admin interface at `/admin/ui.html` or review the logs for detailed information about sync operations.
+**Version 10.1.0** - Enhanced stability, comprehensive error handling, and powerful debugging tools for production deployments.

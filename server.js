@@ -53,7 +53,77 @@ app.get("/rarity-snapshot.json", (req, res) => {
 });
 
 // health
-app.get("/health", (req,res)=>res.json({ok:true}));
+app.get("/health", (req,res)=>{
+  try {
+    // Check database connectivity
+    const dbStatus = db.prepare("SELECT 1 as test").get();
+    
+    // Check memory usage
+    const memUsage = process.memoryUsage();
+    
+    // Check uptime
+    const uptime = process.uptime();
+    
+    res.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      uptime: Math.round(uptime),
+      memory: {
+        rss: Math.round(memUsage.rss / 1024 / 1024) + "MB",
+        heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + "MB",
+        heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + "MB"
+      },
+      database: dbStatus ? "connected" : "error",
+      syncStatus: syncProgress.isRunning ? "running" : "idle",
+      activeTokens: tokens.size
+    });
+  } catch (error) {
+    log.error({ error: error.message }, "Health check failed");
+    res.status(500).json({ 
+      ok: false, 
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Detailed health check for debugging
+app.get("/health/detailed", (req,res)=>{
+  try {
+    const status = getSyncStatus.get();
+    const { nulls, nonnull } = countRarity.get() || {};
+    
+    res.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      uptime: Math.round(process.uptime()),
+      memory: process.memoryUsage(),
+      database: {
+        path: DB_PATH,
+        size: fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0
+      },
+      sync: {
+        status: status?.sync_status || "unknown",
+        lastSync: status?.last_sync_date || "never",
+        totalEmblems: status?.total_emblems || 0,
+        rarityData: { nulls: nulls || 0, nonnull: nonnull || 0 }
+      },
+      progress: syncProgress,
+      tokens: {
+        count: tokens.size,
+        active: Array.from(tokens.keys()).map(k => k.substring(0, 8) + "...")
+      }
+    });
+  } catch (error) {
+    log.error({ error: error.message, stack: error.stack }, "Detailed health check failed");
+    res.status(500).json({ 
+      ok: false, 
+      error: error.message,
+      stack: error.stack,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
 
 const BUNGIE = axios.create({
   baseURL: "https://www.bungie.net/Platform",
@@ -130,6 +200,30 @@ async function shouldSyncToday() {
   return !isToday(status.last_sync_date);
 }
 
+// Global sync state for progress tracking
+let syncProgress = {
+  isRunning: false,
+  current: 0,
+  total: 0,
+  currentBatch: 0,
+  totalBatches: 0,
+  currentEmblem: null,
+  startTime: null,
+  estimatedTimeRemaining: null
+};
+
+function updateSyncProgress(update) {
+  Object.assign(syncProgress, update);
+  
+  // Calculate estimated time remaining
+  if (syncProgress.current > 0 && syncProgress.startTime) {
+    const elapsed = Date.now() - syncProgress.startTime;
+    const rate = syncProgress.current / elapsed;
+    const remaining = (syncProgress.total - syncProgress.current) / rate;
+    syncProgress.estimatedTimeRemaining = Math.round(remaining / 1000); // in seconds
+  }
+}
+
 async function performDailySync() {
   const today = new Date().toISOString().split('T')[0];
   const now = Math.floor(Date.now() / 1000);
@@ -138,6 +232,18 @@ async function performDailySync() {
     log.info("Starting daily emblem rarity sync...");
     updateSyncStatus.run(today, now, 0, "in_progress");
     
+    // Initialize progress tracking
+    updateSyncProgress({
+      isRunning: true,
+      current: 0,
+      total: 0,
+      currentBatch: 0,
+      totalBatches: 0,
+      currentEmblem: null,
+      startTime: Date.now(),
+      estimatedTimeRemaining: null
+    });
+    
     // Get all emblem hashes from catalog
     const catalogRows = listCatalog.all();
     const emblemHashes = catalogRows.map(r => r.itemHash);
@@ -145,13 +251,32 @@ async function performDailySync() {
     if (emblemHashes.length === 0) {
       log.warn("No emblems found in catalog, skipping sync");
       updateSyncStatus.run(today, now, 0, "completed");
+      updateSyncProgress({ isRunning: false });
       return;
     }
     
     log.info({ total: emblemHashes.length }, "Syncing emblem rarities");
     
-    // Launch browser for scraping
-    await launchBrowser();
+    // Update progress with total count
+    updateSyncProgress({
+      total: emblemHashes.length,
+      totalBatches: Math.ceil(emblemHashes.length / 50)
+    });
+    
+    // Launch browser for scraping with timeout
+    try {
+      await Promise.race([
+        launchBrowser(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Browser launch timeout")), 30000)
+        )
+      ]);
+    } catch (browserError) {
+      log.error({ error: browserError.message }, "Failed to launch browser for sync");
+      updateSyncStatus.run(today, now, 0, "failed");
+      updateSyncProgress({ isRunning: false });
+      return;
+    }
     
     // Process emblems in batches to avoid overwhelming the system
     const batchSize = 50;
@@ -160,27 +285,68 @@ async function performDailySync() {
     
     for (let i = 0; i < emblemHashes.length; i += batchSize) {
       const batch = emblemHashes.slice(i, i + batchSize);
-      log.info({ batch: Math.floor(i / batchSize) + 1, total: Math.ceil(emblemHashes.length / batchSize), size: batch.length }, "Processing batch");
+      const batchNumber = Math.floor(i / batchSize) + 1;
       
-      // Process batch with concurrency control
+      updateSyncProgress({
+        currentBatch: batchNumber,
+        currentEmblem: `Processing batch ${batchNumber}/${Math.ceil(emblemHashes.length / batchSize)}`
+      });
+      
+      log.info({ batch: batchNumber, total: Math.ceil(emblemHashes.length / batchSize), size: batch.length }, "Processing batch");
+      
+      // Process batch with concurrency control and timeout protection
       const promises = batch.map(itemHash => 
         new Promise(async (resolve) => {
           try {
-            const result = await scrapeEmblemRarity(itemHash);
+            updateSyncProgress({ currentEmblem: `Scraping emblem ${itemHash}` });
+            
+            // Add timeout to individual emblem scraping
+            const result = await Promise.race([
+              scrapeEmblemRarity(itemHash),
+              new Promise((_, reject) => 
+                setTimeout(() => reject(new Error("Emblem scraping timeout")), 60000)
+              )
+            ]);
+            
             if (result.percent !== null) {
               setRarity.run(itemHash, result.percent, result.label, result.source, now);
               successCount++;
             }
             processed++;
+            
+            updateSyncProgress({ current: processed });
+            
+            // Log progress every 10 emblems
+            if (processed % 10 === 0) {
+              const percent = Math.round((processed / emblemHashes.length) * 100);
+              log.info({ 
+                progress: `${processed}/${emblemHashes.length} (${percent}%)`,
+                success: successCount,
+                current: itemHash
+              }, "Sync progress update");
+            }
+            
           } catch (error) {
             log.error({ itemHash, error: error.message }, "Failed to scrape emblem");
             processed++;
+            updateSyncProgress({ current: processed });
           }
           resolve();
         })
       );
       
-      await Promise.all(promises);
+      // Process batch with timeout
+      try {
+        await Promise.race([
+          Promise.all(promises),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error("Batch processing timeout")), 300000) // 5 minutes per batch
+          )
+        ]);
+      } catch (batchError) {
+        log.error({ batch: batchNumber, error: batchError.message }, "Batch processing failed, continuing with next batch");
+        // Continue with next batch instead of failing completely
+      }
       
       // Small delay between batches
       if (i + batchSize < emblemHashes.length) {
@@ -191,14 +357,18 @@ async function performDailySync() {
     // Update sync status
     updateSyncStatus.run(today, now, successCount, "completed");
     
+    // Clear progress tracking
+    updateSyncProgress({ isRunning: false });
+    
     // Write snapshot
     writeSnapshotSafe();
     
     log.info({ total: emblemHashes.length, success: successCount, processed }, "Daily sync completed");
     
   } catch (error) {
-    log.error({ error: error.message }, "Daily sync failed");
+    log.error({ error: error.message, stack: error.stack }, "Daily sync failed");
     updateSyncStatus.run(today, now, 0, "failed");
+    updateSyncProgress({ isRunning: false });
   }
 }
 
@@ -402,11 +572,21 @@ app.get("/api/sync/status", (req, res) => {
       last_sync_timestamp: status?.last_sync_timestamp || 0,
       total_emblems: status?.total_emblems || 0,
       sync_status: status?.sync_status || "pending",
-      should_sync_today: status ? !isToday(status.last_sync_date) : true
+      should_sync_today: status ? !isToday(status.last_sync_date) : true,
+      progress: syncProgress // Include current progress state
     });
   } catch (e) {
     log.error({ error: e.message }, "Failed to get sync status");
     res.status(500).json({ error: "Failed to get sync status" });
+  }
+});
+
+app.get("/api/sync/progress", (req, res) => {
+  try {
+    res.json(syncProgress);
+  } catch (e) {
+    log.error({ error: e.message }, "Failed to get sync progress");
+    res.status(500).json({ error: "Failed to get sync progress" });
   }
 });
 
@@ -430,9 +610,15 @@ app.get("/api/emblems", async (req, res) => {
   try{
     const sid = req.query.sid;
     if (!sid || !tokens.has(sid)) return res.status(401).json({ error: "Not linked" });
+    
+    log.info({ sid: sid.substring(0, 8) + "..." }, "Processing emblem request");
+    
     const mem = await getMembership(sid);
     const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
     const hashes = await getOwnedEmblemItemHashes(profile);
+    
+    log.info({ sid: sid.substring(0, 8) + "...", emblemCount: hashes.length }, "Retrieved emblem hashes");
+    
     if (!hashes.length) return res.json({ emblems: [] });
 
     // Build rows from database
@@ -454,6 +640,8 @@ app.get("/api/emblems", async (req, res) => {
       });
     }
     
+    log.info({ sid: sid.substring(0, 8) + "...", rows: rows.length, missing: missing.length }, "Built emblem rows");
+    
     // resolve some missing name/icons now
     for (const h of missing.slice(0,48)){
       try {
@@ -469,7 +657,9 @@ app.get("/api/emblems", async (req, res) => {
             if (ic) row.image = `https://www.bungie.net${ic}`;
           }
         }
-      }catch{}
+      }catch(e){
+        log.warn({ itemHash: h, error: e.message }, "Failed to resolve missing emblem data");
+      }
     }
 
     // sort by rarity
@@ -481,18 +671,28 @@ app.get("/api/emblems", async (req, res) => {
       performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
     }
 
+    log.info({ sid: sid.substring(0, 8) + "...", finalCount: rows.length }, "Sending emblem response");
     res.json({ emblems: rows });
-  }catch(e){ log.error({ err:e?.message }, "/api/emblems failed"); res.status(500).json({ error: "Server error" }); }
+  }catch(e){ 
+    log.error({ err:e?.message, stack: e?.stack }, "/api/emblems failed"); 
+    res.status(500).json({ error: "Server error" }); 
+  }
 });
 
 app.get("/api/rarity", async (req, res) => {
   try{
     const hash = Number(req.query.hash);
     if (!hash) return res.status(400).json({ error: "hash required" });
+    
+    log.info({ hash }, "Processing rarity request");
+    
     const r = await getRarityCached(hash);
     res.setHeader("Cache-Control", "public, max-age=3600");
     res.json(r);
-  }catch(e){ log.error({ err:e?.message }, "/api/rarity failed"); res.status(500).json({ error:"rarity error" }); }
+  }catch(e){ 
+    log.error({ err:e?.message, stack: e?.stack }, "/api/rarity failed"); 
+    res.status(500).json({ error:"rarity error" }); 
+  }
 });
 
 // Admin endpoints
@@ -530,14 +730,54 @@ app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.ht
 // Check if we need to sync on startup
 async function checkStartupSync() {
   try {
+    log.info("Checking if startup sync is needed...");
+    
     if (await shouldSyncToday()) {
       log.info("Startup sync needed, triggering daily sync");
-      performDailySync().catch(e => log.error({ error: e.message }, "Startup sync failed"));
+      // Delay startup sync to avoid blocking server startup
+      setTimeout(() => {
+        performDailySync().catch(e => log.error({ error: e.message, stack: e.stack }, "Startup sync failed"));
+      }, 10000); // Wait 10 seconds after startup
     } else {
       log.info("No startup sync needed, data is current");
     }
   } catch (e) {
-    log.error({ error: e.message }, "Startup sync check failed");
+    log.error({ error: e.message, stack: e.stack }, "Startup sync check failed");
+  }
+}
+
+// Graceful shutdown handling
+async function gracefulShutdown(signal) {
+  log.info({ signal }, "Received shutdown signal, starting graceful shutdown...");
+  
+  try {
+    // Stop accepting new requests
+    server.close(() => {
+      log.info("HTTP server closed");
+    });
+    
+    // Close database connections
+    if (db) {
+      db.close();
+      log.info("Database connections closed");
+    }
+    
+    // Close browser
+    try {
+      const browser = await launchBrowser();
+      if (browser) {
+        await browser.close();
+        log.info("Browser closed");
+      }
+    } catch (e) {
+      log.warn({ error: e.message }, "Failed to close browser during shutdown");
+    }
+    
+    log.info("Graceful shutdown completed");
+    process.exit(0);
+  } catch (error) {
+    log.error({ error: error.message }, "Error during graceful shutdown");
+    process.exit(1);
   }
 }
 
@@ -545,20 +785,46 @@ async function checkStartupSync() {
 if (CRON_ENABLED === "true" && REFRESH_CRON){
   cron.schedule(REFRESH_CRON, () => {
     log.info("Cron triggered daily sync");
-    performDailySync().catch(e => log.error({ err:e?.message }, "cron sync failed"));
+    performDailySync().catch(e => log.error({ err:e?.message, stack: e?.stack }, "cron sync failed"));
   }, { timezone: CRON_TZ });
   log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "cron scheduled");
 }
 
+// Handle various shutdown signals
+process.on("SIGTERM", gracefulShutdown);
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGUSR2", gracefulShutdown); // For nodemon
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  log.error({ error: error.message, stack: error.stack }, "Uncaught Exception");
+  // Don't exit immediately, let the process continue if possible
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  log.error({ reason: reason?.message || reason, stack: reason?.stack }, "Unhandled Rejection at Promise");
+  // Don't exit immediately, let the process continue if possible
+});
+
+let server;
 process.on("SIGTERM", async () => {
-  try { await (await launchBrowser()).close(); } catch {}
+  try { 
+    const browser = await launchBrowser();
+    if (browser) await browser.close(); 
+  } catch {}
   process.exit(0);
 });
 
 app.listen(PORT, async () => {
-  await launchBrowser();
-  log.info(`Listening on ${PORT}`);
-  
-  // Check if we need to sync on startup
-  setTimeout(checkStartupSync, 5000); // Wait 5 seconds after startup
+  try {
+    await launchBrowser();
+    log.info(`Listening on ${PORT}`);
+    
+    // Check if we need to sync on startup
+    setTimeout(checkStartupSync, 5000); // Wait 5 seconds after startup
+  } catch (error) {
+    log.error({ error: error.message, stack: error.stack }, "Failed to start server");
+    process.exit(1);
+  }
 });
