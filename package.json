@@ -1,6 +1,6 @@
 {
   "name": "emblemrarity-app",
-  "version": "8.1.4",
+  "version": "8.1.5",
   "type": "module",
   "scripts": {
     "start": "node server.js",

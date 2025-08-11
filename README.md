@@ -27,3 +27,8 @@ git push
 
 ## v8.1.4
 - Fix: remove duplicate `chips` declaration in client JS (was causing "Identifier 'chips' has already been declared" and blocking login/emblem fetch).
+
+
+## v8.1.5
+- Admin key is normalized (trims surrounding quotes/whitespace). Works even if Railway shows `"warm123"`.
+- New `GET /admin/help` reports whether admin is configured (without exposing the key) and whether query auth is allowed.

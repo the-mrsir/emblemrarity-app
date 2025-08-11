@@ -432,13 +432,21 @@ app.get("/rarity-snapshot.json", (req, res) => {
 
 // Admin: force refresh + snapshot
 function isAdmin(req){
-  const key = process.env.ADMIN_KEY;
+  const key = normKey(process.env.ADMIN_KEY);
   if (!key) return false;
-  const hdr = req.headers["x-admin-key"] || req.headers["x-admin_key"];
+  const hdr = normKey(req.headers["x-admin-key"] || req.headers["x-admin_key"]);
   const allowQuery = String(process.env.ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
-  const q = allowQuery ? (req.query.key || (req.body && req.body.key)) : null;
+  const q = allowQuery ? normKey((req.query && req.query.key) || (req.body && req.body.key)) : null;
   return (hdr && hdr === key) || (q && q === key);
 }
+function normKey(v){
+  try { return (v==null?"" : String(v)).trim().replace(/^([\'\"])(.*)\1$/, "$2"); } catch { return ""; }
+}
+app.get("/admin/help", (req,res)=>{
+  const k = normKey(process.env.ADMIN_KEY);
+  const allow = String(process.env.ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
+  res.json({ adminConfigured: Boolean(k), allowQuery: allow, keyLength: k.length });
+});
 app.get("/admin/ping", (req, res)=>{
   if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
   res.json({ ok:true, admin:true });
@@ -549,7 +557,7 @@ app.get("/stats", (req, res) => {
   try {
     const cat = listCatalog.all().length;
     const rc = countRarity.get() || {};
-    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: Number(process.env.RARITY_CONCURRENCY||"2"), minGapMs: Number(process.env.RARITY_MIN_GAP_MS||"200") }, adminConfigured: Boolean(process.env.ADMIN_KEY) });
+    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: Number(process.env.RARITY_CONCURRENCY||"2"), minGapMs: Number(process.env.RARITY_MIN_GAP_MS||"200") }, adminConfigured: Boolean(normKey(process.env.ADMIN_KEY)) });
   } catch (e) { logErr("stats", e); res.status(500).json({ error: "stats error" }); }
 });
 
