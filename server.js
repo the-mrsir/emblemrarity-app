@@ -639,20 +639,17 @@ app.get("/api/emblems", async (req, res) => {
       return res.json({ emblems: [] });
     }
     
-    // Build response from database and enrich with icon variants
+    // Build response from database ONLY (avoid slow extra fetches)
     const emblems = [];
-    const iconMap = {};
-    await Promise.all(emblemHashes.map(async (hash) => {
-      iconMap[hash] = await getItemIconVariants(hash);
-    }));
     for (const hash of emblemHashes) {
       const emblem = getEmblem.get(hash);
       if (!emblem) continue;
-      const icons = iconMap[hash] || {};
+      const small = emblem.icon ? `https://www.bungie.net${emblem.icon}` : null;
+      const icons = { small, banner: small, overlay: null, special: null };
       emblems.push({
         itemHash: hash,
         name: emblem.name || `Emblem ${hash}`,
-        image: emblem.icon ? `https://www.bungie.net${emblem.icon}` : (icons.banner || icons.small),
+        image: small,
         icons,
         rarityPercent: emblem.percent,
         rarityLabel: emblem.label,
