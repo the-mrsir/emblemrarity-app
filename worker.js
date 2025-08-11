@@ -4,16 +4,24 @@ let ctx;
 let active = 0;
 const MAX_CONC = Number(process.env.RARITY_CONCURRENCY || "2");
 const MIN_GAP = Number(process.env.RARITY_MIN_GAP_MS || "200");
+const COOLDOWN_MS = Number(process.env.RARITY_COOLDOWN_MS || "180000");
 let lastAt = 0;
+let cooldownUntil = 0;
+let recent403 = 0;
 
 const queue = [];
 function runQueue(){
   if (active >= MAX_CONC) return;
+  if (Date.now() < cooldownUntil){
+    setTimeout(runQueue, Math.max(50, cooldownUntil - Date.now()));
+    return;
+  }
   const task = queue.shift();
   if (!task) return;
   active++;
   (async () => {
-    const wait = Math.max(0, MIN_GAP - (Date.now() - lastAt));
+    const jitter = Math.floor(Math.random() * MIN_GAP);
+    const wait = Math.max(0, (MIN_GAP + jitter) - (Date.now() - lastAt));
     await new Promise(r => setTimeout(r, wait));
     lastAt = Date.now();
     try { await task(); } finally { active--; runQueue(); }
@@ -127,6 +135,16 @@ export function queueScrape(itemHash, onDone){
   queue.push(async () => {
     try {
       const r = await scrapeOnce(itemHash);
+      // 403 handling & cooldown
+      if ((r?.status === 403) || (r?.reason === 'http_403')){
+        recent403++;
+        if (recent403 >= 5){
+          cooldownUntil = Date.now() + COOLDOWN_MS;
+          recent403 = 0;
+        }
+      } else if (r?.percent != null) {
+        recent403 = Math.max(0, recent403 - 1);
+      }
       await onDone(r);
     } catch {}
   });
