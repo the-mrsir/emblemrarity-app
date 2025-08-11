@@ -40,6 +40,18 @@ if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) 
 
 const app = express();
 app.use(express.static("public"));
+// Serve snapshot even if file missing (return empty array)
+app.get("/rarity-snapshot.json", (req, res) => {
+  const fp = path.join(__dirname, "public", "rarity-snapshot.json");
+  try {
+    if (!fs.existsSync(fp)) return res.json([]);
+    const data = fs.readFileSync(fp, "utf-8");
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    return res.send(data);
+  } catch { return res.json([]); }
+});
+
 app.use(express.json({ limit: "1mb" }));
 
 const BUNGIE = axios.create({
@@ -378,10 +390,24 @@ app.get("/api/rarity", async (req, res) => {
 
 // ---- Public refresh endpoints (no auth; temporary) ----
 app.get("/refresh-now", async (req,res) => {
+  if (publicRefreshBusy) return res.status(429).json({ error: "busy" });
+  publicRefreshBusy = true; publicRefreshLast = Date.now();
   try{
-    if (publicRefreshBusy) return res.status(429).json({ error: "busy" });
+    await launchBrowser();
+    const limit = req.query?.limit ? Number(req.query.limit) : null;
+    await refreshAllRarities(limit);
+    const { nulls, nonnull } = countRarity.get() || {};
+    return res.json({ ok:true, rarity:{ nulls, nonnull }, last: publicRefreshLast });
+  }catch(e){
+    log.error({ err:e?.message }, "refresh-now error");
+    return res.status(500).json({ error:"refresh error" });
+  } finally {
+    publicRefreshBusy = false;
+  }
+});
     publicRefreshBusy = true; publicRefreshLast = Date.now();
     const limit = req.query?.limit ? Number(req.query.limit) : null;
+    await launchBrowser();
     await refreshAllRarities(limit);
     publicRefreshBusy = false;
     const { nulls, nonnull } = countRarity.get() || {};
@@ -407,6 +433,7 @@ app.get("/admin/refresh", async (req,res) => {
   try{
     if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
     const limit = req.query?.limit ? Number(req.query.limit) : null;
+    await launchBrowser();
     await refreshAllRarities(limit);
     const { nulls, nonnull } = countRarity.get() || {};
     res.json({ ok:true, rarity: { nulls, nonnull } });
@@ -434,6 +461,7 @@ app.get("/stats", (req,res) => {
   }catch(e){ res.status(500).json({ error:"stats error" }); }
 });
 
+app.get("/health", (req,res)=>res.json({ok:true}));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 process.on("SIGTERM", async () => {

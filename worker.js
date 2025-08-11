@@ -23,6 +23,8 @@ function runQueue(){
 export async function launchBrowser(){
   if (!browser){
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] });
+  }
+  if (!ctx){
     ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
       locale: "en-US",
@@ -42,6 +44,7 @@ function extractPct(text){
 
 async function scrapeOnce(itemHash){
   await launchBrowser();
+  if (!ctx) { await launchBrowser(); }
   const page = await ctx.newPage();
   const url = `https://www.light.gg/db/items/${itemHash}/`;
   let res = { percent: null, label: "light.gg", source: url };
