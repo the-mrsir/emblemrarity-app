@@ -59,7 +59,10 @@ function isAdmin(req){
 }
 
 // ---------------- DB ----------------
-const db = new Database(path.join(process.cwd(), "cache.db"));
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "cache.db");
+const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.exec(`
 CREATE TABLE IF NOT EXISTS collectible_item (
@@ -301,6 +304,11 @@ if (CRON_ENABLED === "true" && REFRESH_CRON){
     refreshAllRarities().catch(e => log.error({ err:e?.message }, "cron refresh failed"));
   }, { timezone: CRON_TZ });
   log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "cron scheduled");
+
+// public refresh lock
+let publicRefreshBusy = false;
+let publicRefreshLast = 0;
+
 }
 
 // ---------------- API ----------------
@@ -366,6 +374,23 @@ app.get("/api/rarity", async (req, res) => {
     res.setHeader("Cache-Control", "public, max-age=3600");
     res.json(r);
   }catch(e){ log.error({ err:e?.message }, "/api/rarity failed"); res.status(500).json({ error:"rarity error" }); }
+});
+
+// ---- Public refresh endpoints (no auth; temporary) ----
+app.get("/refresh-now", async (req,res) => {
+  try{
+    if (publicRefreshBusy) return res.status(429).json({ error: "busy" });
+    publicRefreshBusy = true; publicRefreshLast = Date.now();
+    const limit = req.query?.limit ? Number(req.query.limit) : null;
+    await refreshAllRarities(limit);
+    publicRefreshBusy = false;
+    const { nulls, nonnull } = countRarity.get() || {};
+    return res.json({ ok:true, rarity:{ nulls, nonnull }, last: publicRefreshLast });
+  }catch(e){ publicRefreshBusy = false; log.error({ err:e?.message }, "refresh-now error"); return res.status(500).json({ error:"refresh error" }); }
+});
+app.get("/snapshot-now", (req,res)=>{
+  try{ writeSnapshotSafe(); res.json({ ok:true }); }
+  catch(e){ res.status(500).json({ error:"snapshot error" }); }
 });
 
 // Admin endpoints

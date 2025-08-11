@@ -38,6 +38,9 @@
   </header>
   <main>
     <div class="controls">
+  <button class="btn" id="warmQuick" type="button">Warm cache (quick)</button>
+  <button class="btn" id="warmAll" type="button">Warm all</button>
+
       <input class="input" id="search" placeholder="Search emblem...">
       <select class="input" id="sort">
         <option value="rarity">Sort by rarity (rarest first)</option>
@@ -205,6 +208,8 @@ async function loadData() {
   prefetchMissing();
 }
 
+document.getElementById("warmQuick").onclick = async ()=>{ try{ const r = await fetch("/refresh-now?limit=300").then(r=>r.json()); alert("Warming quick: " + (r.ok?"OK":"ERR")); }catch(e){ alert("Warm failed"); } };
+document.getElementById("warmAll").onclick = async ()=>{ try{ const r = await fetch("/refresh-now").then(r=>r.json()); alert("Warming all: " + (r.ok?"OK":"ERR")); }catch(e){ alert("Warm failed"); } };
 if (sid) {
   loginBtn.style.display = "none";
   loadData();
