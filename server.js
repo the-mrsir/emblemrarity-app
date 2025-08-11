@@ -13,6 +13,19 @@ const __dirname = path.dirname(__filename);
 
 const log = pino({ level: process.env.LOG_LEVEL || "info" });
 
+// In-memory activity log for admin UI
+const ACTIVITY_LIMIT = 200;
+const activity = [];
+function addActivity(level, message, data) {
+  try {
+    const entry = { ts: Date.now(), level, message, ...(data ? { data } : {}) };
+    activity.unshift(entry);
+    if (activity.length > ACTIVITY_LIMIT) activity.length = ACTIVITY_LIMIT;
+    // Also write to server log
+    log[level] ? log[level]({ message, data }) : log.info({ message, data });
+  } catch {}
+}
+
 const {
   PORT = 3000,
   BASE_URL,
@@ -216,14 +229,19 @@ async function performDailySync() {
                 now
               );
               successCount++;
+              addActivity('info', 'Rarity OK', { itemHash, percent: result.percent });
+            }
+            if (!result || result.percent === null) {
+              addActivity('warn', 'Rarity NULL', { itemHash });
             }
           } catch (e) {
             log.warn({ itemHash, error: e?.message }, "Failed to persist rarity");
+            addActivity('error', 'Persist failed', { itemHash, error: e?.message });
           } finally {
             processed++;
             if (processed % 10 === 0) {
               const percent = Math.round((processed / emblemHashes.length) * 100);
-              log.info({ progress: `${processed}/${emblemHashes.length} (${percent}%)`, success: successCount }, "Sync progress");
+              addActivity('info', 'Sync progress', { processed, total: emblemHashes.length, success: successCount, percent });
             }
             updateProgress({ current: processed, currentEmblem: `Processed ${itemHash}` });
             resolve();
@@ -744,6 +762,13 @@ app.get("/api/sync/status", (req, res) => {
 // Sync progress endpoint
 app.get("/api/sync/progress", (req, res) => {
   res.json(syncProgress);
+});
+
+// Admin-visible activity feed
+app.get('/api/sync/activity', (req,res) => {
+  try{
+    res.json(activity);
+  }catch(e){ res.status(500).json({ error:'activity error' }); }
 });
 
 // On-demand rarity refresh for a single emblem (lightweight utility)

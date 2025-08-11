@@ -634,6 +634,26 @@
             }
         }
 
+        async function refreshActivity(){
+            try{
+                const r = await fetch('/api/sync/activity');
+                if (!r.ok) return;
+                const items = await r.json();
+                const log = document.getElementById('activityLog');
+                log.innerHTML = '';
+                for (const it of items.slice(0,50)){
+                    const entry = document.createElement('div');
+                    entry.className = 'log-entry';
+                    const ts = new Date(it.ts).toLocaleTimeString();
+                    const lvl = it.level || 'info';
+                    const msg = it.message || '';
+                    const data = it.data ? ` ${JSON.stringify(it.data)}` : '';
+                    entry.innerHTML = `<span class="timestamp">${ts}</span><span class="level ${lvl}">${lvl.toUpperCase()}</span><span>${msg}${data}</span>`;
+                    log.appendChild(entry);
+                }
+            }catch{}
+        }
+
         // Event listeners
         const elTriggerSync = document.getElementById('triggerSync');
         if (elTriggerSync) elTriggerSync.addEventListener('click', triggerDailySync);
@@ -667,10 +687,11 @@
 
         // Initial load
         updateStatusDisplay();
+        refreshActivity();
         addLogEntry('Admin interface loaded', 'info');
-
+        
         // Auto-refresh every 30 seconds
-        setInterval(updateStatusDisplay, 30000);
+        setInterval(() => { updateStatusDisplay(); refreshActivity(); }, 30000);
 </script>
 </body>
 </html>
