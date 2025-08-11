@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Destiny 2 Emblem Rarity Tracker</title>
-    <style>
+  <style>
         :root{
           --bg:#0b0f14;--bg2:#0e131a;--panel:#121824;--line:#1f2937;--text:#e5edf7;--muted:#94a3b8;--accent:#c5a76a;--accent2:#4cc3ff;
         }
-        *{box-sizing:border-box}
+    *{box-sizing:border-box}
         body{margin:0;background:radial-gradient(1200px 600px at 20% -20%, rgba(76,195,255,.08), transparent),radial-gradient(1200px 600px at 120% 20%, rgba(197,167,106,.08), transparent),var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,Helvetica,sans-serif}
         .container{max-width:1200px;margin:0 auto;padding:24px}
         .header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:20px}
@@ -37,13 +37,16 @@
         .link:hover{text-decoration:underline}
         .loading{text-align:center;padding:40px;color:var(--muted)}
         .error{background:rgba(255,123,140,.1);color:#ffb3bf;border:1px solid rgba(255,123,140,.25);border-radius:10px;padding:16px;margin:20px 0}
-    </style>
+  </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <div class="brand"><div class="sig"></div><h1>Emblem Rarity</h1></div>
-            <a href="/login" class="admin-link">Login with Bungie</a>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <a id="syncBtn" href="#" class="admin-link" style="display:none">Sync rarity</a>
+              <a id="loginBtn" href="/login" class="admin-link">Login with Bungie</a>
+            </div>
         </div>
 
         
@@ -69,7 +72,7 @@
         }
 
         // Load user's emblems
-        async function loadUserEmblems() {
+         async function loadUserEmblems() {
             const urlParams = new URLSearchParams(window.location.search);
             const sid = urlParams.get('sid');
             
@@ -78,6 +81,21 @@
                     '<div class="error">Please <a href="/login">login with Bungie</a> to view your emblems.</div>';
                 return;
             }
+             // hide login button if authenticated
+             const lb = document.getElementById('loginBtn');
+             if (lb) lb.style.display = 'none';
+             const sb = document.getElementById('syncBtn');
+             if (sb) {
+               sb.style.display = 'inline-block';
+               sb.onclick = async (e)=>{
+                 e.preventDefault();
+                 try{
+                   const r = await fetch('/api/sync/trigger',{method:'POST'});
+                   const j = await r.json().catch(()=>({}));
+                   console.log('sync:', j);
+                 }catch{}
+               };
+             }
 
             try {
                 const response = await fetch(`/api/emblems?sid=${sid}`);
@@ -111,7 +129,7 @@
             grid.className = 'emblems-grid';
             
             userEmblems.forEach(emblem => {
-                const card = document.createElement('div');
+                 const card = document.createElement('div');
                 card.className = 'emblem-card';
                 const icons = emblem.icons || {};
                 const rarityClass = getRarityClass(emblem.rarityPercent);
@@ -135,6 +153,7 @@
                   </div>
                   <div class="links">
                     <a class="link" href="https://www.light.gg/db/items/${emblem.itemHash}/" target="_blank" rel="noopener">View on light.gg</a>
+                    <a class="link" href="#" onclick="triggerSingleScrape(${emblem.itemHash});return false;">Refresh rarity</a>
                   </div>
                 `;
                 
@@ -157,6 +176,17 @@
         async function init() {
             await loadSnapshot();
             await loadUserEmblems();
+        }
+
+        // Manual refresh per-emblem (uses sync system; server will ignore if not allowed)
+        async function triggerSingleScrape(hash){
+            try{
+                const res = await fetch(`/api/rarity?hash=${hash}`);
+                if (res.ok){
+                    // Soft refresh user list to update percent shown
+                    await loadUserEmblems();
+                }
+            }catch{}
         }
 
         // Start when page loads

@@ -471,12 +471,13 @@ async function getEntity(entityType, hash) {
   }
 }
 
-// Cache and return multiple icon variants for an item
+// Cache and return multiple icon variants for an item (fetch full def to avoid DB stub)
 const itemIconCache = new Map();
 async function getItemIconVariants(itemHash) {
   if (itemIconCache.has(itemHash)) return itemIconCache.get(itemHash);
   try {
-    const it = await getEntity("DestinyInventoryItemDefinition", itemHash);
+    const r = await BUNGIE.get(`/Destiny2/Manifest/DestinyInventoryItemDefinition/${itemHash}/`);
+    const it = r.data?.Response;
     const makeUrl = (p) => (p ? `https://www.bungie.net${p}` : null);
     const out = {
       small: makeUrl(it?.displayProperties?.icon),
@@ -486,7 +487,8 @@ async function getItemIconVariants(itemHash) {
     };
     itemIconCache.set(itemHash, out);
     return out;
-  } catch {
+  } catch (e) {
+    log.warn({ itemHash, error: e?.message }, "Failed to load full item icons");
     return { small: null, banner: null, overlay: null, special: null };
   }
 }
@@ -659,6 +661,35 @@ app.get("/api/sync/status", (req, res) => {
 // Sync progress endpoint
 app.get("/api/sync/progress", (req, res) => {
   res.json(syncProgress);
+});
+
+// On-demand rarity refresh for a single emblem (lightweight utility)
+app.post("/api/rarity/refresh", async (req, res) => {
+  try {
+    const hash = Number(req.query.hash);
+    if (!hash) return res.status(400).json({ error: "hash required" });
+    // If full sync is running, avoid contention
+    if (syncProgress.isRunning) return res.status(409).json({ error: "Sync is running. Try again later." });
+    const now = Math.floor(Date.now() / 1000);
+    const result = await new Promise((resolve) => queueScrape(hash, resolve));
+    if (result && result.percent != null) {
+      setEmblem.run(
+        hash,
+        null,
+        null,
+        result.percent,
+        result.label || "light.gg Community",
+        result.source || `https://www.light.gg/db/items/${hash}/`,
+        now
+      );
+      writeSnapshot();
+      return res.json({ ok: true, itemHash: hash, percent: result.percent, label: result.label || "light.gg Community", updatedAt: now });
+    }
+    return res.status(200).json({ ok: true, itemHash: hash, percent: null });
+  } catch (e) {
+    log.error({ error: e?.message }, "rarity refresh failed");
+    res.status(500).json({ error: "refresh failed" });
+  }
 });
 
 // Trigger sync endpoint
