@@ -1,10 +1,12 @@
 {
   "name": "emblemrarity-app",
-  "version": "10.1.0",
+  "version": "11.0.0",
+  "description": "Destiny 2 Emblem Rarity Tracker with Daily Sync",
+  "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "populate-catalog": "node populate_catalog.js",
+    "populate": "node populate_catalog.js",
     "debug": "node debug.js",
     "test": "node test-system.js",
     "check-db": "node check-db.js",
@@ -12,12 +14,17 @@
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {
-    "axios": "^1.7.3",
-    "express": "^4.19.2",
-    "better-sqlite3": "^9.4.3",
+    "axios": "^1.6.0",
+    "better-sqlite3": "^9.2.2",
+    "express": "^4.18.2",
     "node-cron": "^3.0.3",
-    "playwright": "^1.46.0",
-    "pino": "^9.3.2",
-    "pino-pretty": "^11.2.2"
-  }
+    "pino": "^8.17.0",
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["destiny2", "emblems", "rarity", "bungie", "api"],
+  "author": "Your Name",
+  "license": "MIT"
 }

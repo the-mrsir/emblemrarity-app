@@ -7,7 +7,6 @@ import Database from "better-sqlite3";
 import cron from "node-cron";
 import pino from "pino";
 import { launchBrowser, queueScrape } from "./worker.js";
-import { exec } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,15 +20,9 @@ const {
   BUNGIE_CLIENT_ID,
   BUNGIE_CLIENT_SECRET,
   ADMIN_KEY,
-  ALLOW_QUERY_ADMIN = "true",
   CRON_ENABLED = "true",
   REFRESH_CRON = "0 3 * * *", // 3 AM daily
-  CRON_TZ = "America/New_York",
-  LIGHTGG_TTL = "2592000",
-  LIGHTGG_NULL_TTL = "1800",
-  BUNGIE_CONCURRENCY = "12",
-  RARITY_CONCURRENCY = "2",
-  RARITY_MIN_GAP_MS = "200"
+  CRON_TZ = "America/New_York"
 } = process.env;
 
 if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) {
@@ -41,7 +34,7 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static("public"));
 
-// Serve snapshot even if file missing (return empty array)
+// Serve snapshot
 app.get("/rarity-snapshot.json", (req, res) => {
   const fp = path.join(__dirname, "public", "rarity-snapshot.json");
   try {
@@ -53,213 +46,96 @@ app.get("/rarity-snapshot.json", (req, res) => {
   } catch { return res.json([]); }
 });
 
-
-
+// Bungie API client
 const BUNGIE = axios.create({
   baseURL: "https://www.bungie.net/Platform",
   headers: { "X-API-Key": BUNGIE_API_KEY },
   timeout: 20000
 });
 
-function normKey(v){ try { return (v==null?"":String(v)).trim().replace(/^(['"])(.*)\1$/, "$2"); } catch { return ""; } }
-function isAdmin(req){
-  const key = normKey(ADMIN_KEY);
+// Admin check
+function isAdmin(req) {
+  const key = ADMIN_KEY?.trim();
   if (!key) return false;
-  const hdr = normKey(req.headers["x-admin-key"] || req.headers["x-admin_key"]);
-  const allowQuery = String(ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
-  const q = allowQuery ? normKey((req.query && req.query.key) || (req.body && req.body.key)) : "";
+  const hdr = req.headers["x-admin-key"]?.trim();
+  const q = req.query?.key?.trim() || req.body?.key?.trim();
   return (hdr && hdr === key) || (q && q === key);
 }
 
-// ---------------- DB ----------------
+// Database setup
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "cache.db");
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "emblems.db");
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
+
+// Create tables
 db.exec(`
-CREATE TABLE IF NOT EXISTS collectible_item (
-  collectibleHash INTEGER PRIMARY KEY,
-  itemHash INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS emblem_catalog (
+CREATE TABLE IF NOT EXISTS emblems (
   itemHash INTEGER PRIMARY KEY,
   name TEXT,
-  icon TEXT
-);
-CREATE TABLE IF NOT EXISTS rarity_cache (
-  itemHash INTEGER PRIMARY KEY,
+  icon TEXT,
   percent REAL,
-  label TEXT,
+  label TEXT DEFAULT 'light.gg Community',
   source TEXT,
   updatedAt INTEGER
 );
-CREATE TABLE IF NOT EXISTS daily_sync_status (
+
+CREATE TABLE IF NOT EXISTS sync_status (
   id INTEGER PRIMARY KEY DEFAULT 1,
   last_sync_date TEXT,
   last_sync_timestamp INTEGER,
   total_emblems INTEGER,
-  sync_status TEXT
+  sync_status TEXT DEFAULT 'pending'
+);
+
+CREATE TABLE IF NOT EXISTS collectibles (
+  collectibleHash INTEGER PRIMARY KEY,
+  itemHash INTEGER NOT NULL
 );
 `);
 
-// Initialize daily sync status if empty
-db.exec(`INSERT OR IGNORE INTO daily_sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')`);
+// Initialize sync status
+db.exec(`INSERT OR IGNORE INTO sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')`);
 
-const setCollectible = db.prepare("INSERT INTO collectible_item (collectibleHash,itemHash) VALUES (?,?) ON CONFLICT(collectibleHash) DO UPDATE SET itemHash=excluded.itemHash");
-const getCollectible = db.prepare("SELECT itemHash FROM collectible_item WHERE collectibleHash=?");
-const upsertCatalog = db.prepare("INSERT INTO emblem_catalog (itemHash,name,icon) VALUES (?,?,?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon)");
-const getCatalog = db.prepare("SELECT itemHash,name,icon FROM emblem_catalog WHERE itemHash=?");
-const listCatalog = db.prepare("SELECT itemHash FROM emblem_catalog");
-const getRarity = db.prepare("SELECT percent,label,source,updatedAt FROM rarity_cache WHERE itemHash=?");
-const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,source,updatedAt) VALUES (?,?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET percent=excluded.percent,label=excluded.label,source=excluded.source,updatedAt=excluded.updatedAt");
-const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE 0 END) as nulls, SUM(CASE WHEN percent IS NOT NULL THEN 1 ELSE 0 END) as nonnull FROM rarity_cache");
-const getSyncStatus = db.prepare("SELECT last_sync_date, last_sync_timestamp, total_emblems, sync_status FROM daily_sync_status WHERE id = 1");
-const updateSyncStatus = db.prepare("UPDATE daily_sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
+// Prepared statements
+const getEmblem = db.prepare("SELECT * FROM emblems WHERE itemHash = ?");
+const setEmblem = db.prepare("INSERT INTO emblems (itemHash, name, icon, percent, label, source, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon), percent=excluded.percent, label=excluded.label, source=excluded.source, updatedAt=excluded.updatedAt");
+const listEmblems = db.prepare("SELECT itemHash FROM emblems");
+const countEmblems = db.prepare("SELECT COUNT(*) as count FROM emblems WHERE percent IS NOT NULL");
+const getCollectible = db.prepare("SELECT itemHash FROM collectibles WHERE collectibleHash = ?");
+const setCollectible = db.prepare("INSERT INTO collectibles (collectibleHash, itemHash) VALUES (?, ?) ON CONFLICT(collectibleHash) DO UPDATE SET itemHash = excluded.itemHash");
+const getSyncStatus = db.prepare("SELECT * FROM sync_status WHERE id = 1");
+const updateSyncStatus = db.prepare("UPDATE sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
 
-// ---------------- Health Endpoints ----------------
-app.get("/health", (req,res)=>{
-  try {
-    // Check database connectivity
-    const dbStatus = db.prepare("SELECT 1 as test").get();
-    
-    // Check memory usage
-    const memUsage = process.memoryUsage();
-    
-    // Check uptime
-    const uptime = process.uptime();
-    
-    res.json({
-      ok: true,
-      timestamp: new Date().toISOString(),
-      uptime: Math.round(uptime),
-      memory: {
-        rss: Math.round(memUsage.rss / 1024 / 1024) + "MB",
-        heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + "MB",
-        heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + "MB"
-      },
-      database: dbStatus ? "connected" : "error",
-      syncStatus: syncProgress.isRunning ? "running" : "idle",
-      activeTokens: tokens.size
-    });
-  } catch (error) {
-    log.error({ error: error.message }, "Health check failed");
-    res.status(500).json({ 
-      ok: false, 
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// Detailed health check for debugging
-app.get("/health/detailed", (req,res)=>{
-  try {
-    const status = getSyncStatus.get();
-    const { nulls, nonnull } = countRarity.get() || {};
-    
-    res.json({
-      ok: true,
-      timestamp: new Date().toISOString(),
-      uptime: Math.round(process.uptime()),
-      memory: process.memoryUsage(),
-      database: {
-        path: DB_PATH,
-        size: fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0
-      },
-      sync: {
-        status: status?.sync_status || "unknown",
-        lastSync: status?.last_sync_date || "never",
-        totalEmblems: status?.total_emblems || 0,
-        rarityData: { nulls: nulls || 0, nonnull: nonnull || 0 }
-      },
-      progress: syncProgress,
-      tokens: {
-        count: tokens.size,
-        active: Array.from(tokens.keys()).map(k => k.substring(0, 8) + "...")
-      }
-    });
-  } catch (error) {
-    log.error({ error: error.message, stack: error.stack }, "Detailed health check failed");
-    res.status(500).json({ 
-      ok: false, 
-      error: error.message,
-      stack: error.stack,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// ---------------- Rarity (ONE SYSTEM ONLY) ----------------
-async function getRarityCached(itemHash){
-  // ONLY check database - NO scraping, NO sync triggering
-  const row = getRarity.get(itemHash);
-  if (row && row.percent !== null) {
-    return { percent: row.percent, label: row.label, source: row.source, updatedAt: row.updatedAt };
-  }
-  
-  // If no data, return null - let the daily sync handle it
-  return { percent: null, label: "light.gg", source: `https://www.light.gg/db/items/${itemHash}/`, updatedAt: null };
-}
-
-// ---------------- Daily Sync System (THE ONLY SYNC) ----------------
-function isToday(dateString) {
-  const today = new Date().toISOString().split('T')[0];
-  return dateString === today;
-}
-
-async function shouldSyncToday() {
-  const status = getSyncStatus.get();
-  
-  // If no status or never synced, always sync
-  if (!status || !status.last_sync_date) return true;
-  
-  // If no emblems in catalog, need to populate first
-  const catalogCount = listCatalog.all().length;
-  if (catalogCount === 0) {
-    log.warn("No emblems in catalog - populate catalog first");
-    return false;
-  }
-  
-  // If total_emblems is 0 but catalog has emblems, something is wrong - resync
-  if (status.total_emblems === 0 && catalogCount > 0) {
-    log.info(`Catalog has ${catalogCount} emblems but sync shows 0 - forcing resync`);
-    return true;
-  }
-  
-  // Check if we already synced today
-  return !isToday(status.last_sync_date);
-}
-
-// Global sync state for progress tracking
+// Global sync state
 let syncProgress = {
   isRunning: false,
   current: 0,
   total: 0,
-  currentBatch: 0,
-  totalBatches: 0,
   currentEmblem: null,
-  startTime: null,
-  estimatedTimeRemaining: null
+  startTime: null
 };
 
-function updateSyncProgress(update) {
+// Update progress
+function updateProgress(update) {
   Object.assign(syncProgress, update);
-  
-  // Calculate estimated time remaining
-  if (syncProgress.current > 0 && syncProgress.startTime) {
-    const elapsed = Date.now() - syncProgress.startTime;
-    const rate = syncProgress.current / elapsed;
-    const remaining = (syncProgress.total - syncProgress.current) / rate;
-    syncProgress.estimatedTimeRemaining = Math.round(remaining / 1000); // in seconds
-  }
 }
 
+// Check if we need to sync today
+function shouldSyncToday() {
+  const status = getSyncStatus.get();
+  if (!status || !status.last_sync_date) return true;
+  
+  const today = new Date().toISOString().split('T')[0];
+  return status.last_sync_date !== today;
+}
+
+// Perform daily sync
 async function performDailySync() {
-  // Prevent multiple syncs from running
   if (syncProgress.isRunning) {
-    log.info("Daily sync already running, skipping");
+    log.info("Sync already running, skipping");
     return;
   }
 
@@ -270,158 +146,178 @@ async function performDailySync() {
     log.info("Starting daily emblem rarity sync...");
     updateSyncStatus.run(today, now, 0, "in_progress");
     
-    // Initialize progress tracking
-    updateSyncProgress({
+    updateProgress({
       isRunning: true,
       current: 0,
       total: 0,
-      currentBatch: 0,
-      totalBatches: 0,
       currentEmblem: null,
-      startTime: Date.now(),
-      estimatedTimeRemaining: null
+      startTime: Date.now()
     });
     
-    // Get all emblem hashes from catalog
-    const catalogRows = listCatalog.all();
-    const emblemHashes = catalogRows.map(r => r.itemHash);
+    // Get all emblem hashes
+    const emblemRows = listEmblems.all();
+    const emblemHashes = emblemRows.map(r => r.itemHash);
     
     if (emblemHashes.length === 0) {
-      log.warn("No emblems found in catalog, skipping sync");
+      log.warn("No emblems found, need to populate catalog first");
       updateSyncStatus.run(today, now, 0, "completed");
-      updateSyncProgress({ isRunning: false });
+      updateProgress({ isRunning: false });
       return;
     }
     
     log.info({ total: emblemHashes.length }, "Syncing emblem rarities");
+    updateProgress({ total: emblemHashes.length });
     
-    // Update progress with total count
-    updateSyncProgress({
-      total: emblemHashes.length,
-      totalBatches: Math.ceil(emblemHashes.length / 50)
-    });
-    
-    // Launch browser for scraping with timeout
+    // Launch browser
     try {
-      await Promise.race([
-        launchBrowser(),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("Browser launch timeout")), 30000)
-        )
-      ]);
-    } catch (browserError) {
-      log.error({ error: browserError.message }, "Failed to launch browser for sync");
+      await launchBrowser();
+    } catch (error) {
+      log.error({ error: error.message }, "Failed to launch browser");
       updateSyncStatus.run(today, now, 0, "failed");
-      updateSyncProgress({ isRunning: false });
+      updateProgress({ isRunning: false });
       return;
     }
     
-    // Process emblems in batches to avoid overwhelming the system
-    const batchSize = 50;
-    let processed = 0;
+    // Process emblems
     let successCount = 0;
     
-    for (let i = 0; i < emblemHashes.length; i += batchSize) {
-      const batch = emblemHashes.slice(i, i + batchSize);
-      const batchNumber = Math.floor(i / batchSize) + 1;
+    for (let i = 0; i < emblemHashes.length; i++) {
+      const itemHash = emblemHashes[i];
       
-      updateSyncProgress({
-        currentBatch: batchNumber,
-        currentEmblem: `Processing batch ${batchNumber}/${Math.ceil(emblemHashes.length / batchSize)}`
+      updateProgress({
+        current: i + 1,
+        currentEmblem: `Processing emblem ${itemHash}`
       });
       
-      log.info({ batch: batchNumber, total: Math.ceil(emblemHashes.length / batchSize), size: batch.length }, "Processing batch");
-      
-      // Process batch with concurrency control and timeout protection
-      const promises = batch.map(itemHash => 
-        new Promise(async (resolve) => {
-          try {
-            updateSyncProgress({ currentEmblem: `Scraping emblem ${itemHash}` });
-            
-            // Add timeout to individual emblem scraping
-            const result = await Promise.race([
-              scrapeEmblemRarity(itemHash),
-              new Promise((_, reject) => 
-                setTimeout(() => reject(new Error("Emblem scraping timeout")), 60000)
-              )
-            ]);
-            
-            if (result.percent !== null) {
-              setRarity.run(itemHash, result.percent, result.label, result.source, now);
-              successCount++;
-            }
-            processed++;
-            
-            updateSyncProgress({ current: processed });
-            
-            // Log progress every 10 emblems
-            if (processed % 10 === 0) {
-              const percent = Math.round((processed / emblemHashes.length) * 100);
-              log.info({ 
-                progress: `${processed}/${emblemHashes.length} (${percent}%)`,
-                success: successCount,
-                current: itemHash
-              }, "Sync progress update");
-            }
-            
-          } catch (error) {
-            log.error({ itemHash, error: error.message }, "Failed to scrape emblem");
-            processed++;
-            updateSyncProgress({ current: processed });
-          }
-          resolve();
-        })
-      );
-      
-      // Process batch with timeout
       try {
-        await Promise.race([
-          Promise.all(promises),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Batch processing timeout")), 300000) // 5 minutes per batch
-          )
-        ]);
-      } catch (batchError) {
-        log.error({ batch: batchNumber, error: batchError.message }, "Batch processing failed, continuing with next batch");
-        // Continue with next batch instead of failing completely
-      }
-      
-      // Small delay between batches
-      if (i + batchSize < emblemHashes.length) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        const result = await new Promise((resolve) => {
+          queueScrape(itemHash, resolve);
+        });
+        
+        if (result && result.percent !== null) {
+          setEmblem.run(
+            itemHash,
+            null, // name - keep existing
+            null, // icon - keep existing
+            result.percent,
+            result.label || "light.gg Community",
+            result.source || `https://www.light.gg/db/items/${itemHash}/`,
+            now
+          );
+          successCount++;
+        }
+        
+        // Log progress every 10 emblems
+        if ((i + 1) % 10 === 0) {
+          const percent = Math.round(((i + 1) / emblemHashes.length) * 100);
+          log.info({ progress: `${i + 1}/${emblemHashes.length} (${percent}%)`, success: successCount }, "Sync progress");
+        }
+        
+        // Small delay between requests
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+      } catch (error) {
+        log.error({ itemHash, error: error.message }, "Failed to scrape emblem");
       }
     }
     
     // Update sync status
     updateSyncStatus.run(today, now, successCount, "completed");
-    
-    // Clear progress tracking
-    updateSyncProgress({ isRunning: false });
+    updateProgress({ isRunning: false });
     
     // Write snapshot
-    writeSnapshotSafe();
+    writeSnapshot();
     
-    log.info({ total: emblemHashes.length, success: successCount, processed }, "Daily sync completed");
+    log.info({ total: emblemHashes.length, success: successCount }, "Daily sync completed");
     
   } catch (error) {
-    log.error({ error: error.message, stack: error.stack }, "Daily sync failed");
+    log.error({ error: error.message }, "Daily sync failed");
     updateSyncStatus.run(today, now, 0, "failed");
-    updateSyncProgress({ isRunning: false });
+    updateProgress({ isRunning: false });
   }
 }
 
-async function scrapeEmblemRarity(itemHash) {
-  return new Promise((resolve) => {
-    queueScrape(itemHash, (result) => {
-      resolve(result);
-    });
-  });
+// Write snapshot
+function writeSnapshot() {
+  try {
+    const rows = db.prepare("SELECT itemHash, percent, label, source, updatedAt FROM emblems WHERE percent IS NOT NULL").all();
+    fs.writeFileSync(path.join(__dirname, "public", "rarity-snapshot.json"), JSON.stringify(rows));
+    log.info({ count: rows.length }, "Snapshot written");
+  } catch (error) {
+    log.error({ error: error.message }, "Failed to write snapshot");
+  }
 }
 
-// ---------------- OAuth (memory tokens) ----------------
-const tokens = new Map();
-function makeState(){ return Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2); }
+// Populate emblem catalog from Bungie manifest
+async function populateCatalog(force = false) {
+  try {
+    if (force) {
+      db.exec("DELETE FROM emblems");
+      log.info("Cleared existing emblems");
+    }
+    
+    log.info("Fetching Destiny 2 manifest...");
+    const manifestResponse = await BUNGIE.get("/Destiny2/Manifest/");
+    const manifest = manifestResponse.data?.Response;
+    
+    if (!manifest) {
+      throw new Error("Failed to get manifest");
+    }
+    
+    const inventoryItemPath = manifest.inventoryItem?.jsonPath;
+    if (!inventoryItemPath) {
+      throw new Error("No inventory item manifest found");
+    }
+    
+    log.info("Downloading inventory item manifest...");
+    const manifestUrl = `https://www.bungie.net${inventoryItemPath}`;
+    const itemsResponse = await axios.get(manifestUrl, { timeout: 60000 });
+    const items = itemsResponse.data;
+    
+    log.info("Processing manifest items...");
+    let processed = 0;
+    let emblems = 0;
+    
+    for (const [hash, item] of Object.entries(items)) {
+      processed++;
+      
+      // Check if it's an emblem (category 19)
+      if (item.itemCategoryHashes && item.itemCategoryHashes.includes(19)) {
+        const itemHash = parseInt(hash);
+        const name = item.displayProperties?.name || null;
+        const icon = item.secondaryIcon || item.displayProperties?.icon || null;
+        
+        setEmblem.run(itemHash, name, icon, null, null, null, null);
+        emblems++;
+        
+        if (emblems % 100 === 0) {
+          log.info({ processed, emblems }, "Catalog population progress");
+        }
+      }
+    }
+    
+    log.info({ processed, emblems }, "Catalog population completed");
+    
+    // Reset sync status to allow sync
+    const today = new Date().toISOString().split('T')[0];
+    updateSyncStatus.run("", 0, emblems, "pending");
+    
+    return { success: true, emblems };
+    
+  } catch (error) {
+    log.error({ error: error.message }, "Catalog population failed");
+    throw error;
+  }
+}
 
+// OAuth token storage (memory only, no persistence)
+const tokens = new Map();
+
+function makeState() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+
+// Login endpoint
 app.get("/login", (req, res) => {
   const state = makeState();
   tokens.set(state, {});
@@ -433,430 +329,414 @@ app.get("/login", (req, res) => {
   res.redirect(url.toString());
 });
 
+// OAuth callback
 app.get("/oauth/callback", async (req, res) => {
-  try{
+  try {
     const { code, state } = req.query;
-    if (!code || !state || !tokens.has(state)) return res.status(400).send("Bad state");
-    const r = await axios.post("https://www.bungie.net/platform/app/oauth/token/",
+    if (!code || !state || !tokens.has(state)) {
+      return res.status(400).send("Bad state");
+    }
+    
+    const response = await axios.post("https://www.bungie.net/platform/app/oauth/token/",
       new URLSearchParams({
         client_id: BUNGIE_CLIENT_ID,
         grant_type: "authorization_code",
-        code, client_secret: BUNGIE_CLIENT_SECRET,
+        code,
+        client_secret: BUNGIE_CLIENT_SECRET,
         redirect_uri: `${BASE_URL}/oauth/callback`
       }).toString(),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
-    const tok = r.data;
-    tokens.set(state, { access_token: tok.access_token, refresh_token: tok.refresh_token, expires_at: Math.floor(Date.now()/1000)+(tok.expires_in||3600) });
+    
+    const token = response.data;
+    tokens.set(state, {
+      access_token: token.access_token,
+      refresh_token: token.refresh_token,
+      expires_at: Math.floor(Date.now() / 1000) + (token.expires_in || 3600)
+    });
+    
     res.redirect(`/?sid=${encodeURIComponent(state)}`);
-  }catch(e){ log.error({ err:e?.message }, "oauth failed"); res.status(500).send("OAuth failed"); }
+  } catch (error) {
+    log.error({ error: error.message }, "OAuth failed");
+    res.status(500).send("OAuth failed");
+  }
 });
 
-async function authedHeaders(sid){
-  let t = tokens.get(sid);
-  if (!t) throw new Error("Not linked");
-  const now = Math.floor(Date.now()/1000);
-  if (t.expires_at - 15 < now){
-    const r = await axios.post("https://www.bungie.net/platform/app/oauth/token/",
+// Get authenticated headers
+async function getAuthHeaders(sid) {
+  let token = tokens.get(sid);
+  if (!token) throw new Error("Not linked");
+  
+  const now = Math.floor(Date.now() / 1000);
+  if (token.expires_at - 15 < now) {
+    const response = await axios.post("https://www.bungie.net/platform/app/oauth/token/",
       new URLSearchParams({
         client_id: BUNGIE_CLIENT_ID,
         grant_type: "refresh_token",
-        refresh_token: t.refresh_token,
+        refresh_token: token.refresh_token,
         client_secret: BUNGIE_CLIENT_SECRET
       }).toString(),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
     );
-    const nt = r.data;
-    t = { access_token: nt.access_token, refresh_token: nt.refresh_token || t.refresh_token, expires_at: now + (nt.expires_in || 3600) };
-    tokens.set(sid, t);
+    
+    const newToken = response.data;
+    token = {
+      access_token: newToken.access_token,
+      refresh_token: newToken.refresh_token || token.refresh_token,
+      expires_at: now + (newToken.expires_in || 3600)
+    };
+    tokens.set(sid, token);
   }
-  return { Authorization: `Bearer ${t.access_token}`, "X-API-Key": BUNGIE_API_KEY };
+  
+  return { Authorization: `Bearer ${token.access_token}`, "X-API-Key": BUNGIE_API_KEY };
 }
 
-// ---------------- Bungie helpers ----------------
-function isUnlocked(state){ return (state & 1) === 0; }
-async function concurrentMap(items, fn, concurrency=Number(BUNGIE_CONCURRENCY||"12")){
-  const out = new Array(items.length);
-  let i=0;
-  async function worker(){
-    while(i<items.length){
-      const idx=i++;
-      try{ out[idx] = await fn(items[idx], idx); }catch{ out[idx] = null; }
+// Get user's Destiny memberships
+async function getMembership(sid) {
+  const headers = await getAuthHeaders(sid);
+  const response = await BUNGIE.get("/User/GetMembershipsForCurrentUser/", { headers });
+  const resp = response.data?.Response;
+  const memberships = resp?.destinyMemberships || [];
+  
+  if (!memberships.length) throw new Error("No Destiny memberships");
+  
+  const primaryId = resp?.primaryMembershipId;
+  const chosen = primaryId ? memberships.find(m => String(m.membershipId) === String(primaryId)) : memberships[0];
+  return chosen || memberships[0];
+}
+
+// Get user's profile
+async function getProfile(sid, membershipType, membershipId) {
+  const headers = await getAuthHeaders(sid);
+  const response = await BUNGIE.get(`/Destiny2/${membershipType}/Profile/${membershipId}/`, {
+    headers,
+    params: { components: "800,900" }
+  });
+  return response.data?.Response;
+}
+
+// Check if collectible is unlocked
+function isUnlocked(state) {
+  return (state & 1) === 0;
+}
+
+// Get entity from Bungie API with caching
+const entityCache = new Map();
+
+async function getEntity(entityType, hash) {
+  const key = `${entityType}:${hash}`;
+  
+  if (entityCache.has(key)) {
+    return entityCache.get(key);
+  }
+  
+  if (entityType === "DestinyCollectibleDefinition") {
+    const row = getCollectible.get(hash);
+    if (row) {
+      const result = { itemHash: row.itemHash };
+      entityCache.set(key, result);
+      return result;
     }
   }
-  await Promise.all(Array.from({length:Math.min(concurrency, items.length)}, worker));
-  return out;
-}
-
-async function getMembership(sid){
-  const h = await authedHeaders(sid);
-  const r = await BUNGIE.get("/User/GetMembershipsForCurrentUser/", { headers: h });
-  const resp = r.data?.Response;
-  const dms = resp?.destinyMemberships || [];
-  if (!dms.length) throw new Error("No Destiny memberships");
-  const primaryId = resp?.primaryMembershipId;
-  const chosen = primaryId ? dms.find(m => String(m.membershipId) === String(primaryId)) : dms[0];
-  return chosen || dms[0];
-}
-
-async function getProfile(sid, mType, mId){
-  const h = await authedHeaders(sid);
-  const r = await BUNGIE.get(`/Destiny2/${mType}/Profile/${mId}/`, {
-    headers: h, params: { components: "800,900" }
-  });
-  return r.data?.Response;
-}
-
-// Manifest entity fetcher with local caches
-const inflight = new Map();
-async function getEntity(entityType, hash){
-  const key = `${entityType}:${hash}`;
-  if (entityType === "DestinyCollectibleDefinition"){
-    const row = getCollectible.get(hash);
-    if (row) return { itemHash: row.itemHash };
+  
+  if (entityType === "DestinyInventoryItemDefinition") {
+    const emblem = getEmblem.get(hash);
+    if (emblem) {
+      const result = {
+        displayProperties: { name: emblem.name, icon: emblem.icon },
+        secondaryIcon: emblem.icon,
+        itemCategoryHashes: [19]
+      };
+      entityCache.set(key, result);
+      return result;
+    }
   }
-  if (entityType === "DestinyInventoryItemDefinition"){
-    const cat = getCatalog.get(hash);
-    if (cat) return { displayProperties: { name: cat.name, icon: cat.icon }, secondaryIcon: cat.icon, itemCategoryHashes: [19] };
+  
+  try {
+    const response = await BUNGIE.get(`/Destiny2/Manifest/${entityType}/${hash}/`);
+    const data = response.data?.Response;
+    
+    if (!data) return null;
+    
+    if (entityType === "DestinyCollectibleDefinition" && data?.itemHash != null) {
+      setCollectible.run(hash, data.itemHash);
+    }
+    
+    entityCache.set(key, data);
+    return data;
+  } catch (error) {
+    if (error.response?.status === 404) return null;
+    throw error;
   }
-  if (inflight.has(key)) return inflight.get(key);
-  const p = (async () => {
-    const url = `/Destiny2/Manifest/${entityType}/${hash}/`;
-    for (let attempt=1; attempt<=3; attempt++){
-      try {
-        const r = await BUNGIE.get(url);
-        const data = r.data?.Response;
-        if (!data) return null;
-        if (entityType === "DestinyCollectibleDefinition"){
-          if (data?.itemHash != null) setCollectible.run(hash, data.itemHash);
-        } else if (entityType === "DestinyInventoryItemDefinition"){
-          const isEmblem = (data?.itemCategoryHashes || []).includes(19);
-          if (isEmblem){
-            const name = data?.displayProperties?.name || null;
-            const icon = data?.secondaryIcon || data?.displayProperties?.icon || null;
-            upsertCatalog.run(hash, name, icon);
-          }
-        }
-        return data;
-      } catch(e){
-        const status = e?.response?.status;
-        if (status === 404) return null;
-        await new Promise(r => setTimeout(r, 250*attempt));
+}
+
+// Get user's owned emblem hashes
+async function getOwnedEmblemHashes(profile) {
+  const owned = new Set();
+  
+  // Profile collectibles
+  const profileCollectibles = profile?.profileCollectibles?.data?.collectibles || {};
+  for (const [hash, value] of Object.entries(profileCollectibles)) {
+    if (isUnlocked(value?.state ?? 0)) {
+      owned.add(Number(hash));
+    }
+  }
+  
+  // Character collectibles
+  const characters = profile?.characterCollectibles?.data || {};
+  for (const character of Object.values(characters)) {
+    const collectibles = character?.collectibles || {};
+    for (const [hash, value] of Object.entries(collectibles)) {
+      if (isUnlocked(value?.state ?? 0)) {
+        owned.add(Number(hash));
       }
     }
-    return null;
-  })();
-  inflight.set(key, p);
-  try { return await p; } finally { inflight.delete(key); }
-}
-
-async function getOwnedEmblemItemHashes(profile){
-  const owned = new Set();
-  const pColl = profile?.profileCollectibles?.data?.collectibles || {};
-  for (const [hash, v] of Object.entries(pColl)) if (isUnlocked(v?.state ?? 0)) owned.add(Number(hash));
-  const chars = profile?.characterCollectibles?.data || {};
-  for (const c of Object.values(chars)){
-    const colls = c?.collectibles || {};
-    for (const [hash, v] of Object.entries(colls)) if (isUnlocked(v?.state ?? 0)) owned.add(Number(hash));
   }
-  const collHashes = [...owned];
-  const itemHashes = (await concurrentMap(collHashes, async (collHash) => {
-    const c = await getEntity("DestinyCollectibleDefinition", collHash);
-    return c?.itemHash ?? null;
-  })).filter(Boolean);
-  const emblemHashes = (await concurrentMap(itemHashes, async (ih) => {
-    const it = await getEntity("DestinyInventoryItemDefinition", ih);
-    const cats = it?.itemCategoryHashes || [];
-    return cats.includes(19) ? ih : null;
-  })).filter(Boolean);
+  
+  // Convert collectible hashes to item hashes
+  const collectibleHashes = [...owned];
+  const itemHashes = [];
+  
+  for (const collectibleHash of collectibleHashes) {
+    try {
+      const collectible = await getEntity("DestinyCollectibleDefinition", collectibleHash);
+      if (collectible?.itemHash) {
+        itemHashes.push(collectible.itemHash);
+      }
+    } catch (error) {
+      log.warn({ collectibleHash, error: error.message }, "Failed to get collectible");
+    }
+  }
+  
+  // Filter to only emblems
+  const emblemHashes = [];
+  for (const itemHash of itemHashes) {
+    try {
+      const item = await getEntity("DestinyInventoryItemDefinition", itemHash);
+      if (item?.itemCategoryHashes?.includes(19)) {
+        emblemHashes.push(itemHash);
+      }
+    } catch (error) {
+      log.warn({ itemHash, error: error.message }, "Failed to get item");
+    }
+  }
+  
   return [...new Set(emblemHashes)];
 }
 
-// snapshot writer with debounce
-let snapshotTimer = null;
-function writeSnapshotSafe(){
-  clearTimeout(snapshotTimer);
-  snapshotTimer = setTimeout(() => {
-    try {
-      const rows = db.prepare("SELECT itemHash, percent, label, source, updatedAt FROM rarity_cache WHERE percent IS NOT NULL").all();
-      fs.writeFileSync(path.join(__dirname, "public", "rarity-snapshot.json"), JSON.stringify(rows));
-      log.info({ count: rows.length }, "snapshot written");
-    } catch(e){ log.error({ err: e?.message }, "snapshot failed"); }
-  }, 500);
-}
+// Main emblems endpoint
+app.get("/api/emblems", async (req, res) => {
+  try {
+    const sid = req.query.sid;
+    if (!sid || !tokens.has(sid)) {
+      return res.status(401).json({ error: "Not linked" });
+    }
+    
+    log.info({ sid: sid.substring(0, 8) + "..." }, "Processing emblem request");
+    
+    const membership = await getMembership(sid);
+    const profile = await getProfile(sid, membership.membershipType, membership.membershipId);
+    const emblemHashes = await getOwnedEmblemHashes(profile);
+    
+    log.info({ sid: sid.substring(0, 8) + "...", emblemCount: emblemHashes.length }, "Retrieved emblem hashes");
+    
+    if (!emblemHashes.length) {
+      return res.json({ emblems: [] });
+    }
+    
+    // Build response from database
+    const emblems = [];
+    for (const hash of emblemHashes) {
+      const emblem = getEmblem.get(hash);
+      if (emblem) {
+        emblems.push({
+          itemHash: hash,
+          name: emblem.name || `Emblem ${hash}`,
+          image: emblem.icon ? `https://www.bungie.net${emblem.icon}` : null,
+          rarityPercent: emblem.percent,
+          rarityLabel: emblem.label,
+          rarityUpdatedAt: emblem.updatedAt,
+          sourceUrl: emblem.source
+        });
+      }
+    }
+    
+    // Sort by rarity (lowest percentage first)
+    emblems.sort((a, b) => (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
+    
+    log.info({ sid: sid.substring(0, 8) + "...", finalCount: emblems.length }, "Sending emblem response");
+    res.json({ emblems });
+    
+  } catch (error) {
+    log.error({ error: error.message }, "/api/emblems failed");
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
-// ---------------- Daily Sync Endpoints ----------------
-app.get("/api/sync/status", async (req, res) => {
+// Health check
+app.get("/health", (req, res) => {
   try {
     const status = getSyncStatus.get();
-    const { nulls, nonnull } = countRarity.get() || {};
-    const catalogCount = listCatalog.all().length;
+    const { count } = countEmblems.get() || {};
     
-    // Calculate what needs to happen (use async function)
-    const needsSync = await shouldSyncToday();
-    const hasData = (nonnull || 0) > 0;
-    const syncState = status?.sync_status || "pending";
-    
-    // Check for corrupted or empty state
-    let warningMessage = null;
-    let nextAction = needsSync ? "trigger_sync" : "wait_for_tomorrow";
-    if (catalogCount === 0) {
-      warningMessage = "No emblems in catalog. Run: npm run populate-catalog --force or use Admin → Populate Catalog";
-      nextAction = "populate_catalog";
-    } else if (status?.total_emblems === 0 && catalogCount > 0) {
-      warningMessage = `Catalog has ${catalogCount} emblems but sync shows 0. Trigger daily sync.`;
-      nextAction = "trigger_sync";
-    }
+    res.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      uptime: Math.round(process.uptime()),
+      database: "connected",
+      sync: {
+        status: status?.sync_status || "unknown",
+        lastSync: status?.last_sync_date || "never",
+        totalEmblems: status?.total_emblems || 0,
+        rarityData: count || 0
+      },
+      progress: syncProgress
+    });
+  } catch (error) {
+    log.error({ error: error.message }, "Health check failed");
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
+// Sync status endpoint
+app.get("/api/sync/status", (req, res) => {
+  try {
+    const status = getSyncStatus.get();
+    const { count } = countEmblems.get() || {};
+    const totalEmblems = listEmblems.all().length;
+    const needsSync = shouldSyncToday();
     
     res.json({
       last_sync_date: status?.last_sync_date || null,
       last_sync_timestamp: status?.last_sync_timestamp || 0,
       total_emblems: status?.total_emblems || 0,
-      catalog_emblems: catalogCount,
-      sync_status: syncState,
+      catalog_emblems: totalEmblems,
+      sync_status: status?.sync_status || "pending",
       should_sync_today: needsSync,
-      has_rarity_data: hasData,
       rarity_stats: {
-        with_data: nonnull || 0,
-        without_data: nulls || 0
+        with_data: count || 0,
+        without_data: totalEmblems - (count || 0)
       },
       progress: syncProgress,
-      next_action: nextAction,
-      message: warningMessage || (needsSync 
-        ? "Data needs to be synced today. Use admin panel to trigger sync."
-        : "Data is current. Next sync will be tomorrow."),
-      warning: warningMessage
+      next_action: totalEmblems === 0 ? "populate_catalog" : (needsSync ? "trigger_sync" : "wait_for_tomorrow"),
+      message: totalEmblems === 0 
+        ? "No emblems in catalog. Populate catalog first."
+        : (needsSync ? "Data needs to be synced today." : "Data is current.")
     });
-  } catch (e) {
-    log.error({ error: e.message }, "Failed to get sync status");
+  } catch (error) {
+    log.error({ error: error.message }, "Failed to get sync status");
     res.status(500).json({ error: "Failed to get sync status" });
   }
 });
 
+// Sync progress endpoint
 app.get("/api/sync/progress", (req, res) => {
-  try {
-    res.json(syncProgress);
-  } catch (e) {
-    log.error({ error: e.message }, "Failed to get sync progress");
-    res.status(500).json({ error: "Failed to get sync progress" });
-  }
+  res.json(syncProgress);
 });
 
+// Trigger sync endpoint
 app.post("/api/sync/trigger", async (req, res) => {
   try {
     if (syncProgress.isRunning) {
       return res.json({ message: "Sync already running", status: "already_running" });
     }
     
-    if (await shouldSyncToday()) {
-      // Start sync in background
-      performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
+    if (shouldSyncToday()) {
+      performDailySync().catch(error => log.error({ error: error.message }, "Background sync failed"));
       res.json({ message: "Daily sync started", status: "started" });
     } else {
       res.json({ message: "Already synced today", status: "already_synced" });
     }
-  } catch (e) {
-    log.error({ error: e.message }, "Failed to trigger sync");
+  } catch (error) {
+    log.error({ error: error.message }, "Failed to trigger sync");
     res.status(500).json({ error: "Failed to trigger sync" });
   }
 });
 
-// Admin endpoint: populate catalog (server-side)
-app.post("/admin/populate", (req, res) => {
+// Admin endpoints
+app.post("/admin/populate", async (req, res) => {
   try {
-    if (!isAdmin(req)) return res.status(401).json({ error: "Unauthorized" });
-
-    // Prevent running if already running a sync
+    if (!isAdmin(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    
     if (syncProgress.isRunning) {
       return res.status(409).json({ error: "Sync currently running. Try again later." });
     }
-
-    const force = String(req.query.force||"true").toLowerCase() !== "false";
-    const cmd = `node populate_catalog.js${force ? " --force" : ""}`;
-    log.info({ cmd }, "Starting catalog population via admin endpoint");
-
-    const child = exec(cmd, { env: process.env, cwd: process.cwd(), windowsHide: true });
-
-    child.stdout.on("data", (d) => log.info({ line: d.toString().trim() }, "populate stdout"));
-    child.stderr.on("data", (d) => log.warn({ line: d.toString().trim() }, "populate stderr"));
-
-    child.on("exit", (code) => {
-      log.info({ code }, "populate process exited");
-      // After successful population, reset sync status to pending to allow sync
-      if (code === 0) {
-        try {
-          const today = new Date().toISOString().split('T')[0];
-          updateSyncStatus.run("", 0, listCatalog.all().length, "pending");
-        } catch {}
-      }
+    
+    const force = req.query.force !== "false";
+    
+    // Run population in background
+    populateCatalog(force).then(() => {
+      log.info("Catalog population completed");
+    }).catch(error => {
+      log.error({ error: error.message }, "Catalog population failed");
     });
-
-    return res.status(202).json({ message: "Catalog population started", force });
-  } catch (e) {
-    log.error({ error: e.message }, "Failed to start catalog population");
+    
+    res.json({ message: "Catalog population started", force });
+    
+  } catch (error) {
+    log.error({ error: error.message }, "Failed to start catalog population");
     res.status(500).json({ error: "Failed to start catalog population" });
   }
 });
 
-// ---------------- API ----------------
-app.get("/api/emblems", async (req, res) => {
-  try{
-    const sid = req.query.sid;
-    if (!sid || !tokens.has(sid)) return res.status(401).json({ error: "Not linked" });
-    
-    log.info({ sid: sid.substring(0, 8) + "..." }, "Processing emblem request");
-    
-    const mem = await getMembership(sid);
-    const profile = await getProfile(sid, mem.membershipType, mem.membershipId);
-    const hashes = await getOwnedEmblemItemHashes(profile);
-    
-    log.info({ sid: sid.substring(0, 8) + "...", emblemCount: hashes.length }, "Retrieved emblem hashes");
-    
-    if (!hashes.length) return res.json({ emblems: [] });
-
-    // Build rows from database
-    const rows = [];
-    const missing = [];
-    for (const h of hashes){
-      const cat = getCatalog.get(h);
-      const name = cat?.name || `Emblem ${h}`;
-      const icon = cat?.icon ? `https://www.bungie.net${cat.icon}` : null;
-      if (!cat) missing.push(h);
-      const rc = getRarity.get(h);
-      rows.push({
-        itemHash: h,
-        name, image: icon,
-        rarityPercent: rc?.percent ?? null,
-        rarityLabel: rc?.label ?? null,
-        rarityUpdatedAt: rc?.updatedAt ?? null,
-        sourceUrl: rc?.source ?? null
-      });
-    }
-    
-    log.info({ sid: sid.substring(0, 8) + "...", rows: rows.length, missing: missing.length }, "Built emblem rows");
-    
-    // resolve some missing name/icons now
-    for (const h of missing.slice(0,48)){
-      try {
-        const it = await BUNGIE.get(`/Destiny2/Manifest/DestinyInventoryItemDefinition/${h}/`);
-        const d = it.data?.Response;
-        if (d){
-          const nm = d?.displayProperties?.name || null;
-          const ic = d?.secondaryIcon || d?.displayProperties?.icon || null;
-          upsertCatalog.run(h, nm, ic);
-          const row = rows.find(r => r.itemHash===h);
-          if (row){
-            if (nm) row.name = nm;
-            if (ic) row.image = `https://www.bungie.net${ic}`;
-           }
-        }
-      }catch(e){
-        log.warn({ itemHash: h, error: e.message }, "Failed to resolve missing emblem data");
-      }
-    }
-
-    // sort by rarity
-    rows.sort((a,b)=> (a.rarityPercent ?? 9e9) - (b.rarityPercent ?? 9e9));
-    
-    // NO MORE SYNC TRIGGERING - let the daily sync handle it
-    log.info({ sid: sid.substring(0, 8) + "...", finalCount: rows.length }, "Sending emblem response");
-    res.json({ emblems: rows });
-  }catch(e){ 
-    log.error({ err:e?.message, stack: e?.stack }, "/api/emblems failed"); 
-    res.status(500).json({ error: "Server error" }); 
-  }
-});
-
-app.get("/api/rarity", async (req, res) => {
-  try{
-    const hash = Number(req.query.hash);
-    if (!hash) return res.status(400).json({ error: "hash required" });
-    
-    log.info({ hash }, "Processing rarity request");
-    
-    const r = await getRarityCached(hash);
-    res.setHeader("Cache-Control", "public, max-age=3600");
-    res.json(r);
-  }catch(e){ 
-    log.error({ err:e?.message, stack: e?.stack }, "/api/rarity failed"); 
-    res.status(500).json({ error:"rarity error" }); 
-  }
-});
-
-// Admin endpoints
-app.get("/admin/help", (req,res) => {
-  const k = normKey(ADMIN_KEY);
-  const allow = String(ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
-  res.json({ adminConfigured: Boolean(k), allowQuery: allow, keyLength: k.length });
-});
-
-app.get("/admin/ping", (req,res) => {
-  if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
-  res.json({ ok:true, admin:true });
-});
-
-app.post("/admin/sync", async (req,res) => {
-  try{
-    if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
-    await performDailySync();
-    const { nulls, nonnull } = countRarity.get() || {};
-    res.json({ ok:true, rarity: { nulls, nonnull } });
-  }catch(e){ log.error({ err:e?.message }, "admin sync failed"); res.status(500).json({ error:"admin error" }); }
-});
-
-app.post("/admin/snapshot", (req,res) => {
-  try{
-    if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
-    writeSnapshotSafe();
-    res.json({ ok:true });
-  }catch(e){ res.status(500).json({ error:"snapshot error" }); }
-});
-
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
-
-// ---------------- Startup and Cron ----------------
-// Check if we need to sync on startup
-async function checkStartupSync() {
+app.post("/admin/sync", async (req, res) => {
   try {
-    log.info("Checking if startup sync is needed...");
-    
-    if (await shouldSyncToday()) {
-      log.info("Startup sync needed, but will wait for manual trigger or cron");
-      // Don't auto-start sync - let admin or cron handle it
-      log.info("Use admin panel to trigger sync or wait for scheduled cron");
-    } else {
-      log.info("No startup sync needed, data is current");
+    if (!isAdmin(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
     }
-  } catch (e) {
-    log.error({ error: e.message, stack: e.stack }, "Startup sync check failed");
+    
+    await performDailySync();
+    const { count } = countEmblems.get() || {};
+    res.json({ ok: true, rarity: { count } });
+    
+  } catch (error) {
+    log.error({ error: error.message }, "Admin sync failed");
+    res.status(500).json({ error: "Admin sync failed" });
   }
+});
+
+app.post("/admin/snapshot", (req, res) => {
+  try {
+    if (!isAdmin(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    
+    writeSnapshot();
+    res.json({ ok: true });
+    
+  } catch (error) {
+    res.status(500).json({ error: "Snapshot error" });
+  }
+});
+
+// Main page
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// Schedule daily sync
+if (CRON_ENABLED === "true" && REFRESH_CRON) {
+  cron.schedule(REFRESH_CRON, () => {
+    log.info("Cron triggered daily sync");
+    performDailySync().catch(error => log.error({ error: error.message }, "Cron sync failed"));
+  }, { timezone: CRON_TZ });
+  log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "Cron scheduled");
 }
 
-// Graceful shutdown handling
+// Graceful shutdown
 async function gracefulShutdown(signal) {
   log.info({ signal }, "Received shutdown signal, starting graceful shutdown...");
   
   try {
-    // Stop accepting new requests
     server.close(() => {
       log.info("HTTP server closed");
     });
     
-    // Close database connections
     if (db) {
       db.close();
       log.info("Database connections closed");
-    }
-    
-    // Close browser
-    try {
-      const browser = await launchBrowser();
-      if (browser) {
-        await browser.close();
-        log.info("Browser closed");
-      }
-    } catch (e) {
-      log.warn({ error: e.message }, "Failed to close browser during shutdown");
     }
     
     log.info("Graceful shutdown completed");
@@ -867,50 +747,36 @@ async function gracefulShutdown(signal) {
   }
 }
 
-// Schedule daily sync
-if (CRON_ENABLED === "true" && REFRESH_CRON){
-  cron.schedule(REFRESH_CRON, () => {
-    log.info("Cron triggered daily sync");
-    performDailySync().catch(e => log.error({ err:e?.message, stack: e?.stack }, "cron sync failed"));
-  }, { timezone: CRON_TZ });
-  log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "cron scheduled");
-}
-
-// Handle various shutdown signals
+// Handle shutdown signals
 process.on("SIGTERM", gracefulShutdown);
 process.on("SIGINT", gracefulShutdown);
-process.on("SIGUSR2", gracefulShutdown); // For nodemon
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
   log.error({ error: error.message, stack: error.stack }, "Uncaught Exception");
-  // Don't exit immediately, let the process continue if possible
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
   log.error({ reason: reason?.message || reason, stack: reason?.stack }, "Unhandled Rejection at Promise");
-  // Don't exit immediately, let the process continue if possible
 });
 
+// Start server
 let server;
-process.on("SIGTERM", async () => {
-  try { 
-    const browser = await launchBrowser();
-    if (browser) await browser.close(); 
-  } catch {}
-  process.exit(0);
-});
-
-app.listen(PORT, async () => {
+server = app.listen(PORT, async () => {
   try {
     await launchBrowser();
     log.info(`Listening on ${PORT}`);
     
-    // Check startup status but don't auto-start sync
-    setTimeout(checkStartupSync, 5000); // Wait 5 seconds after startup
+    // Check if we need to sync on startup
+    if (shouldSyncToday()) {
+      log.info("Startup sync needed, use admin panel to trigger");
+    } else {
+      log.info("No startup sync needed, data is current");
+    }
+    
   } catch (error) {
-    log.error({ error: error.message, stack: error.stack }, "Failed to start server");
+    log.error({ error: error.message }, "Failed to start server");
     process.exit(1);
   }
 });

@@ -1,281 +1,136 @@
 #!/usr/bin/env node
 
-import Database from "better-sqlite3";
 import axios from "axios";
+import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const BUNGIE_API_KEY = process.env.BUNGIE_API_KEY;
-
 if (!BUNGIE_API_KEY) {
-  console.error("BUNGIE_API_KEY environment variable is required");
+  console.error("BUNGIE_API_KEY environment variable required");
   process.exit(1);
 }
 
 const BUNGIE = axios.create({
   baseURL: "https://www.bungie.net/Platform",
   headers: { "X-API-Key": BUNGIE_API_KEY },
-  timeout: 30000
+  timeout: 60000
 });
 
-// Database setup
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "cache.db");
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "emblems.db");
 
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-
-// Ensure tables exist
-db.exec(`
-CREATE TABLE IF NOT EXISTS emblem_catalog (
-  itemHash INTEGER PRIMARY KEY,
-  name TEXT,
-  icon TEXT
-);
-CREATE TABLE IF NOT EXISTS rarity_cache (
-  itemHash INTEGER PRIMARY KEY,
-  percent REAL,
-  label TEXT,
-  source TEXT,
-  updatedAt INTEGER
-);
-CREATE TABLE IF NOT EXISTS daily_sync_status (
-  id INTEGER PRIMARY KEY DEFAULT 1,
-  last_sync_date TEXT,
-  last_sync_timestamp INTEGER,
-  total_emblems INTEGER,
-  sync_status TEXT
-);
-`);
-
-// Initialize daily sync status if empty
-db.exec(`INSERT OR IGNORE INTO daily_sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')`);
-
-const upsertCatalog = db.prepare("INSERT INTO emblem_catalog (itemHash,name,icon) VALUES (?,?,?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon)");
-const countCatalog = db.prepare("SELECT COUNT(*) as count FROM emblem_catalog");
-
-async function getDestinyManifest() {
+async function populateCatalog(force = false) {
+  const db = new Database(DB_PATH);
+  
   try {
-    console.log("Fetching Destiny 2 manifest...");
-    const response = await BUNGIE.get("/Destiny2/Manifest/");
-    const manifest = response.data?.Response;
-    
-    if (!manifest) {
-      throw new Error("No manifest data received");
+    // Ensure tables exist
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS emblems (
+      itemHash INTEGER PRIMARY KEY,
+      name TEXT,
+      icon TEXT,
+      percent REAL,
+      label TEXT,
+      source TEXT,
+      updatedAt INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS sync_status (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      last_sync_date TEXT,
+      last_sync_timestamp INTEGER,
+      total_emblems INTEGER,
+      sync_status TEXT
+    );
+    `);
+    db.exec("INSERT OR IGNORE INTO sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')");
+
+    if (force) {
+      console.log("Clearing existing emblems...");
+      db.exec("DELETE FROM emblems");
+      db.exec("DELETE FROM sync_status");
+      db.exec("INSERT INTO sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')");
     }
     
-    console.log("Manifest fetched successfully");
-    return manifest;
-  } catch (error) {
-    console.error("Failed to fetch manifest:", error.message);
-    throw error;
-  }
-}
-
-async function downloadManifestFile(url, filename) {
-  try {
-    console.log(`Downloading ${filename}...`);
-    const response = await axios.get(url, { responseType: 'arraybuffer' });
-    fs.writeFileSync(filename, response.data);
-    console.log(`${filename} downloaded successfully`);
-    return true;
-  } catch (error) {
-    console.error(`Failed to download ${filename}:`, error.message);
-    return false;
-  }
-}
-
-async function extractEmblemsFromManifest(manifestPath) {
-  try {
-    console.log("Extracting emblems from manifest...");
+    console.log("Fetching Destiny 2 manifest...");
+    const manifestResponse = await BUNGIE.get("/Destiny2/Manifest/");
+    const manifest = manifestResponse.data?.Response;
     
-    // Read the manifest file
-    const manifestData = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (!manifest) {
+      throw new Error("Failed to get manifest");
+    }
     
-    const emblems = [];
+    const inventoryItemPath = manifest.inventoryItem?.jsonPath;
+    if (!inventoryItemPath) {
+      throw new Error("No inventory item manifest found");
+    }
+    
+    console.log("Downloading inventory item manifest...");
+    const manifestUrl = `https://www.bungie.net${inventoryItemPath}`;
+    const itemsResponse = await axios.get(manifestUrl, { timeout: 120000 });
+    const items = itemsResponse.data;
+    
+    console.log("Processing manifest items...");
     let processed = 0;
-    let category19Count = 0;
-    let nameIconCount = 0;
+    let emblems = 0;
     
-    console.log(`Processing ${Object.keys(manifestData).length} items from manifest...`);
+    const setEmblem = db.prepare("INSERT INTO emblems (itemHash, name, icon, percent, label, source, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon)");
     
-    // Process each item definition
-    for (const [hash, item] of Object.entries(manifestData)) {
+    for (const [hash, item] of Object.entries(items)) {
       processed++;
-      if (processed % 1000 === 0) {
-        console.log(`Processed ${processed} items...`);
-      }
       
-      // Check if this is an emblem (category hash 19)
+      // Check if it's an emblem (category 19)
       if (item.itemCategoryHashes && item.itemCategoryHashes.includes(19)) {
-        category19Count++;
+        const itemHash = parseInt(hash);
         const name = item.displayProperties?.name || null;
         const icon = item.secondaryIcon || item.displayProperties?.icon || null;
         
-        if (name && icon) {
-          nameIconCount++;
-          emblems.push({
-            itemHash: parseInt(hash),
-            name,
-            icon
-          });
+        setEmblem.run(itemHash, name, icon, null, null, null, null);
+        emblems++;
+        
+        if (emblems % 100 === 0) {
+          console.log(`Processed ${processed} items, found ${emblems} emblems...`);
         }
       }
     }
     
-    console.log(`\n📊 Extraction Results:`);
-    console.log(`   Total items processed: ${processed}`);
-    console.log(`   Items with category 19: ${category19Count}`);
-    console.log(`   Items with name & icon: ${nameIconCount}`);
-    console.log(`   Final emblem count: ${emblems.length}`);
+    console.log(`Catalog population completed: ${processed} items processed, ${emblems} emblems found`);
     
-    if (emblems.length === 0) {
-      console.log("\n⚠️  No emblems found! This might indicate:");
-      console.log("   - Manifest file is corrupted");
-      console.log("   - Category hash 19 is not correct");
-      console.log("   - Display properties are missing");
-      
-      // Show some sample items to debug
-      const sampleItems = Object.entries(manifestData).slice(0, 5);
-      console.log("\n🔍 Sample items from manifest:");
-      sampleItems.forEach(([hash, item]) => {
-        console.log(`   Hash: ${hash}`);
-        console.log(`   Categories: ${JSON.stringify(item.itemCategoryHashes)}`);
-        console.log(`   Name: ${item.displayProperties?.name || 'No name'}`);
-        console.log(`   Icon: ${item.secondaryIcon || item.displayProperties?.icon || 'No icon'}`);
-        console.log("   ---");
-      });
-    }
+    // Reset sync status to allow sync
+    const upd = db.prepare("UPDATE sync_status SET last_sync_date = '', last_sync_timestamp = 0, total_emblems = ?, sync_status = 'pending' WHERE id = 1");
+    upd.run(emblems);
     
-    return emblems;
+    return { success: true, emblems };
+    
   } catch (error) {
-    console.error("Failed to extract emblems:", error.message);
+    console.error("Catalog population failed:", error.message);
     throw error;
-  }
-}
-
-async function populateCatalog(emblems) {
-  try {
-    console.log("Populating emblem catalog...");
-    
-    const transaction = db.transaction((emblems) => {
-      for (const emblem of emblems) {
-        upsertCatalog.run(emblem.itemHash, emblem.name, emblem.icon);
-      }
-    });
-    
-    transaction(emblems);
-    
-    const count = countCatalog.get().count;
-    console.log(`Catalog populated with ${count} emblems`);
-    
-    // Update sync status
-    const today = new Date().toISOString().split('T')[0];
-    const now = Math.floor(Date.now() / 1000);
-    db.prepare("UPDATE daily_sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1").run(today, now, count, "completed");
-    
-    return count;
-  } catch (error) {
-    console.error("Failed to populate catalog:", error.message);
-    throw error;
+  } finally {
+    db.close();
   }
 }
 
 async function main() {
+  const force = process.argv.includes("--force");
+  
   try {
     console.log("Starting emblem catalog population...");
-    
-    // Get current catalog count
-    const currentCount = countCatalog.get().count;
-    console.log(`Current catalog has ${currentCount} emblems`);
-    
-    const forceRepopulate = process.argv.includes('--force');
-    
-    if (currentCount > 0 && !forceRepopulate) {
-      console.log("\n⚠️  Catalog already has data!");
-      console.log("   If you want to repopulate, run:");
-      console.log("   npm run populate-catalog --force");
-      console.log("\n   Or if you want to continue with current data:");
-      console.log("   npm start");
-      process.exit(0);
-    }
-    
-    if (forceRepopulate) {
-      console.log("\n🔄 Force flag detected - clearing existing data...");
-      db.exec("DELETE FROM emblem_catalog");
-      db.exec("DELETE FROM rarity_cache");
-      db.exec("UPDATE daily_sync_status SET last_sync_date = '', last_sync_timestamp = 0, total_emblems = 0, sync_status = 'pending'");
-      console.log("✅ Cleared existing catalog data");
-    }
-    
-    // Get manifest
-    const manifest = await getDestinyManifest();
-    
-    // Download inventory item definitions
-    const inventoryUrl = `https://www.bungie.net${manifest.inventoryItem.jsonWorldContentPaths.en}`;
-    const inventoryFile = "inventory_items.json";
-    
-    console.log(`\n📥 Downloading inventory items from: ${inventoryUrl}`);
-    
-    if (!await downloadManifestFile(inventoryUrl, inventoryFile)) {
-      throw new Error("Failed to download inventory items");
-    }
-    
-    // Extract emblems
-    const emblems = await extractEmblemsFromManifest(inventoryFile);
-    
-    if (emblems.length === 0) {
-      throw new Error("No emblems found in manifest");
-    }
-    
-    // Populate catalog
-    const finalCount = await populateCatalog(emblems);
-    
-    console.log(`\n✅ Successfully populated emblem catalog with ${finalCount} emblems!`);
-    console.log("\n🎯 Next steps:");
-    console.log("   1. Start the server: npm start");
-    console.log("   2. Go to admin panel: /admin/ui.html");
-    console.log("   3. Click 'Trigger Daily Sync' to get rarity data");
-    
-    // Clean up
-    try {
-      fs.unlinkSync(inventoryFile);
-      console.log("\n🧹 Cleaned up temporary files");
-    } catch (e) {
-      // Ignore cleanup errors
-    }
-    
+    const result = await populateCatalog(force);
+    console.log("✅ Success:", result);
+    console.log("\nNext steps:");
+    console.log("1. Start the server: npm start");
+    console.log("2. Go to /admin/ui.html");
+    console.log("3. Click 'Trigger Daily Sync' to get rarity data");
   } catch (error) {
-    console.error("\n❌ Failed to populate catalog:", error.message);
+    console.error("❌ Failed:", error.message);
     process.exit(1);
   }
 }
 
-// Handle command line arguments
-if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  console.log(`
-Emblem Catalog Populator
-
-This script downloads the Destiny 2 manifest and populates the emblem catalog
-with all available emblems. This is a one-time setup step.
-
-Usage:
-  node populate_catalog.js [options]
-
-Options:
-  --force    Force repopulation even if catalog has data
-  --help     Show this help message
-
-Environment Variables:
-  BUNGIE_API_KEY    Your Bungie API key (required)
-  DB_DIR            Database directory (optional)
-  DB_PATH           Full database path (optional)
-
-Example:
-  BUNGIE_API_KEY=your_key_here node populate_catalog.js
-`);
-  process.exit(0);
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
 }
-
-main();

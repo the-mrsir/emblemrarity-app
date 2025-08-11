@@ -1,209 +1,225 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Emblem Rarity</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    :root { --bg:#0f1115; --card:#171a21; --text:#e6e8ee; --muted:#9aa3b2; --accent:#d5b36a; --line:#222631; --chip:#202633; }
-    *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Arial}
-    header{padding:24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
-    .brand{font-size:20px;letter-spacing:1px;display:flex;gap:10px;align-items:center}
-    .brand .sig{width:10px;height:10px;border:2px solid var(--accent);transform:rotate(45deg)}
-    .btn{padding:10px 14px;border:1px solid var(--accent);border-radius:10px;text-decoration:none;color:var(--text);background:transparent}
-    .btn:hover{background:rgba(213,179,106,.1)}
-    main{padding:24px;max-width:1200px;margin:0 auto}
-    .controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
-    .input{background:var(--card);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:10px}
-    .chip{background:var(--chip);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:999px;cursor:pointer;user-select:none}
-    .chip.active{border-color:var(--accent)}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden;display:flex;flex-direction:column}
-    .imgwrap{position:relative;aspect-ratio:16/9;background:#0a0c10;display:flex;align-items:center;justify-content:center}
-    .imgwrap img{width:100%;height:100%;object-fit:cover}
-    .badge{position:absolute;top:10px;left:10px;background:rgba(15,17,21,.85);padding:6px 10px;border:1px solid var(--accent);border-radius:999px;font-size:12px}
-    .card h3{margin:12px;font-size:16px}
-    .meta{margin:0 12px 12px 12px;color:var(--muted);font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:8px}
-    .links{display:flex;gap:10px;margin:0 12px 16px 12px}
-    .links a{font-size:12px;color:var(--accent);text-decoration:none}
-    .empty{color:var(--muted);padding:24px}
-    .small{font-size:12px;color:var(--muted)}
-    .info-banner{background:rgba(213,179,106,.1);border:1px solid var(--accent);border-radius:10px;padding:12px;margin-bottom:16px;font-size:14px;color:var(--accent)}
-    .admin-link{color:var(--accent);text-decoration:none;font-size:12px;opacity:0.8}
-    .admin-link:hover{opacity:1}
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Destiny 2 Emblem Rarity Tracker</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #333;
+            margin: 0;
+        }
+        .info-box {
+            background: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 6px;
+            padding: 16px;
+            margin-bottom: 20px;
+            color: #004085;
+        }
+        .info-box h4 {
+            margin: 0 0 8px 0;
+            color: #004085;
+        }
+        .info-box p {
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        .admin-link {
+            display: inline-block;
+            background: #007bff;
+            color: white;
+            padding: 10px 20px;
+            text-decoration: none;
+            border-radius: 6px;
+            margin-top: 10px;
+            transition: background 0.2s;
+        }
+        .admin-link:hover {
+            background: #0056b3;
+        }
+        .emblems-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .emblem-card {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .emblem-card h3 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 16px;
+        }
+        .emblem-card .rarity {
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .emblem-card .rarity.rare {
+            color: #007bff;
+            font-weight: bold;
+        }
+        .emblem-card .rarity.very-rare {
+            color: #6f42c1;
+            font-weight: bold;
+        }
+        .emblem-card .rarity.ultra-rare {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            border-radius: 6px;
+            padding: 16px;
+            margin: 20px 0;
+        }
+    </style>
 </head>
 <body>
-  <header>
-    <div class="brand"><span class="sig"></span> Emblem Rarity</div>
-    <a class="btn" id="loginBtn" href="/login">Log in with Bungie.net</a>
-  </header>
-  <main>
-    <div class="info-banner">
-      🚀 <strong>Daily Sync System Active</strong> - All emblem rarity data is automatically refreshed once per day and served instantly from our local database.
-      <a href="/admin/ui.html" class="admin-link">Admin Panel</a>
+    <div class="container">
+        <div class="header">
+            <h1>Destiny 2 Emblem Rarity Tracker</h1>
+            <p>Track the rarity of your Destiny 2 emblems</p>
+        </div>
+
+        <div class="info-box">
+            <h4>🚀 New Daily Sync System</h4>
+            <p>This system automatically syncs emblem rarity data once per day. All user requests now get instant responses from the local database. No more real-time scraping needed!</p>
+            <a href="/admin/ui.html" class="admin-link">Go to Admin Panel</a>
+        </div>
+
+        <div id="emblemsContainer">
+            <div class="loading">Loading your emblems...</div>
+        </div>
     </div>
-    
-    <div class="controls">
-      <input class="input" id="search" placeholder="Search emblem...">
-      <select class="input" id="sort">
-        <option value="rarity">Sort by rarity (rarest first)</option>
-        <option value="name">Sort by name (A–Z)</option>
-        <option value="hash">Sort by item hash</option>
-      </select>
-      <span class="chip" data-th="1">Show &lt; 1%</span>
-      <span class="chip" data-th="0.1">Show &lt; 0.1%</span>
-      <span id="count" class="input" style="opacity:.8;">0 emblems</span>
-    </div>
-    <div id="status" class="empty">Log in to see your rarest emblems.</div>
-    <div class="grid" id="grid"></div>
-  </main>
 
-<script>
-function qs(k){ return new URLSearchParams(location.search).get(k); }
-const sid = qs("sid");
-const statusEl = document.getElementById("status");
-const grid = document.getElementById("grid");
-const search = document.getElementById("search");
-const sortSel = document.getElementById("sort");
-const countEl = document.getElementById("count");
-const loginBtn = document.getElementById("loginBtn");
-const chips = Array.from(document.querySelectorAll(".chip"));
+    <script>
+        let snapshot = [];
+        let userEmblems = [];
 
-let data = [];
-let filtered = [];
-let threshold = null;
-let snapshot = {};
-let snapshotLoaded = false;
+        // Load snapshot data
+        async function loadSnapshot() {
+            try {
+                const response = await fetch('/rarity-snapshot.json');
+                snapshot = await response.json();
+                console.log(`Loaded ${snapshot.length} emblems from snapshot`);
+            } catch (error) {
+                console.error('Failed to load snapshot:', error);
+            }
+        }
 
-// Load snapshot first
-fetch("/rarity-snapshot.json").then(r=>r.ok?r.json():[]).then(arr=>{
-  (arr||[]).forEach(r=>{ snapshot[r.itemHash]=r; });
-  snapshotLoaded = true;
-  if (data.length) { seedFromSnapshot(); render(); }
-}).catch(()=>{});
+        // Load user's emblems
+        async function loadUserEmblems() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const sid = urlParams.get('sid');
+            
+            if (!sid) {
+                document.getElementById('emblemsContainer').innerHTML = 
+                    '<div class="error">Please <a href="/login">login with Bungie</a> to view your emblems.</div>';
+                return;
+            }
 
-// NO MORE INDIVIDUAL EMBLEM FETCHING - only use snapshot data from daily sync
-// The prefetchMissing function is removed - all data comes from snapshot
+            try {
+                const response = await fetch(`/api/emblems?sid=${sid}`);
+                if (!response.ok) {
+                    throw new Error('Failed to fetch emblems');
+                }
+                
+                const data = await response.json();
+                userEmblems = data.emblems || [];
+                
+                displayEmblems();
+                
+            } catch (error) {
+                console.error('Failed to load user emblems:', error);
+                document.getElementById('emblemsContainer').innerHTML = 
+                    '<div class="error">Failed to load your emblems. Please try again.</div>';
+            }
+        }
 
-const io = new IntersectionObserver((entries) => {
-  entries.forEach(async (entry) => {
-    if (!entry.isIntersecting) return;
-    const card = entry.target;
-    if (card.dataset.loaded) return;
-    card.dataset.loaded = "1";
-    const hash = card.dataset.hash;
-    
-    // Use snapshot data only - no API calls
-    const r = snapshot[hash];
-    if (r && r.percent != null) {
-      const pct = Number(r.percent).toFixed(4) + "%";
-      const badge = card.querySelector(".badge");
-      badge.textContent = `${badge.textContent.split("•")[0]}• ${pct}`;
-      const meta = card.querySelector(".meta .label");
-      if (meta) meta.textContent = r.label || "";
-      const upd = card.querySelector(".meta .updated");
-      if (upd && r.updatedAt) {
-        const ageMs = Date.now() - (r.updatedAt * 1000);
-        const days = Math.floor(ageMs / (1000*60*60*24));
-        upd.textContent = days > 0 ? `Updated ${days}d ago` : "Updated today";
-      }
-      
-      // Update data array with snapshot info
-      const idx = data.findIndex(x => String(x.itemHash) === String(hash));
-      if (idx >= 0) {
-        data[idx].rarityPercent = r.percent;
-        data[idx].rarityLabel = r.label;
-        data[idx].rarityUpdatedAt = r.updatedAt;
-        if (sortSel.value === "rarity") render();
-      }
-    }
-  });
-}, { rootMargin: "200px" });
+        // Display emblems
+        function displayEmblems() {
+            if (userEmblems.length === 0) {
+                document.getElementById('emblemsContainer').innerHTML = 
+                    '<div class="error">No emblems found. This might be a temporary issue.</div>';
+                return;
+            }
 
-function seedFromSnapshot(){
-  let touched = false;
-  data = data.map(d => {
-    if (d.rarityPercent == null) {
-      const s = snapshot[d.itemHash];
-      if (s && s.percent != null) { touched = true; return {...d, rarityPercent: s.percent, rarityLabel: s.label, rarityUpdatedAt: s.updatedAt}; }
-    }
-    return d;
-  });
-  return touched;
-}
+            const container = document.getElementById('emblemsContainer');
+            container.innerHTML = `<h2>Your Emblems (${userEmblems.length})</h2>`;
+            
+            const grid = document.createElement('div');
+            grid.className = 'emblems-grid';
+            
+            userEmblems.forEach(emblem => {
+                const card = document.createElement('div');
+                card.className = 'emblem-card';
+                
+                const rarityClass = getRarityClass(emblem.rarityPercent);
+                const rarityText = emblem.rarityPercent 
+                    ? `${emblem.rarityPercent.toFixed(2)}% - ${emblem.rarityLabel || 'light.gg Community'}`
+                    : 'Rarity data not available';
+                
+                card.innerHTML = `
+                    <h3>${emblem.name || `Emblem ${emblem.itemHash}`}</h3>
+                    <div class="rarity ${rarityClass}">${rarityText}</div>
+                    ${emblem.image ? `<img src="${emblem.image}" alt="Emblem" style="max-width: 100%; height: auto; margin-top: 10px;">` : ''}
+                `;
+                
+                grid.appendChild(card);
+            });
+            
+            container.appendChild(grid);
+        }
 
-function render() {
-  grid.innerHTML = "";
-  const q = (search.value || "").toLowerCase();
-  filtered = data.filter(d => d.name.toLowerCase().includes(q));
-  if (threshold != null) filtered = filtered.filter(d => d.rarityPercent != null && d.rarityPercent < threshold);
-  if (sortSel.value === "name") filtered.sort((a,b) => a.name.localeCompare(b.name));
-  else if (sortSel.value === "hash") filtered.sort((a,b) => a.itemHash - b.itemHash);
-  else filtered.sort((a,b) => (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
+        // Get rarity CSS class
+        function getRarityClass(percent) {
+            if (!percent) return '';
+            if (percent <= 1) return 'ultra-rare';
+            if (percent <= 5) return 'very-rare';
+            if (percent <= 15) return 'rare';
+            return '';
+        }
 
-  countEl.textContent = `${filtered.length} emblems`;
+        // Initialize
+        async function init() {
+            await loadSnapshot();
+            await loadUserEmblems();
+        }
 
-  if (!filtered.length){ statusEl.style.display="block"; statusEl.textContent="No results."; return; }
-  statusEl.style.display="none";
-
-  const frag = document.createDocumentFragment();
-  filtered.forEach((e, i) => {
-    const card = document.createElement("div"); card.className="card"; card.dataset.hash = e.itemHash;
-    const imgwrap = document.createElement("div"); imgwrap.className="imgwrap";
-    const img = document.createElement("img"); img.loading="lazy"; img.src=e.image||""; img.alt=e.name;
-    const badge = document.createElement("div"); badge.className="badge";
-    let pctVal = e.rarityPercent;
-    if (pctVal == null && snapshot[e.itemHash]?.percent != null) pctVal = snapshot[e.itemHash].percent;
-    const pct = pctVal == null ? "..." : Number(pctVal).toFixed(4) + "%";
-    badge.textContent = `#${i+1} • ${pct}`;
-    imgwrap.append(img, badge);
-    const title = document.createElement("h3"); title.textContent = e.name;
-    const updatedText = (()=>{
-      const ts = e.rarityUpdatedAt || snapshot[e.itemHash]?.updatedAt;
-      if (!ts) return "";
-      const ageMs = Date.now() - (ts * 1000);
-      const days = Math.floor(ageMs / (1000*60*60*24));
-      return days > 0 ? `Updated ${days}d ago` : "Updated today";
-    })();
-    const meta = document.createElement("div"); meta.className="meta"; meta.innerHTML = `<span class="label">${e.rarityLabel||snapshot[e.itemHash]?.label||""}</span><span class="small updated">${updatedText}</span>`;
-    const links = document.createElement("div"); links.className="links";
-    const lg = document.createElement("a"); lg.href=`https://www.light.gg/db/items/${e.itemHash}/`; lg.target="_blank"; lg.rel="noopener"; lg.textContent="light.gg";
-    links.append(lg);
-    card.append(imgwrap, title, meta, links);
-    frag.appendChild(card);
-  });
-  grid.appendChild(frag);
-  document.querySelectorAll(".card").forEach(c => io.observe(c));
-}
-
-chips.forEach(ch => {
-  ch.addEventListener("click", () => {
-    chips.forEach(c => c.classList.remove("active"));
-    if (threshold === Number(ch.dataset.th)) { threshold = null; render(); return; }
-    ch.classList.add("active");
-    threshold = Number(ch.dataset.th);
-    render();
-  });
-});
-
-async function loadData() {
-  statusEl.textContent = "Fetching your emblems...";
-  const json = await fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`).then(r=>r.json());
-  data = json.emblems || [];
-  if (!data.length){ statusEl.textContent="No emblems found."; return; }
-  seedFromSnapshot();
-  render();
-  // prefetchMissing(); // Removed as per new logic
-}
-
-if (sid) {
-  loginBtn.style.display = "none";
-  loadData();
-}
-search.addEventListener("input", render);
-sortSel.addEventListener("change", render);
-</script>
+        // Start when page loads
+        init();
+    </script>
 </body>
 </html>

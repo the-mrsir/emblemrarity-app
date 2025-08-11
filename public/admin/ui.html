@@ -302,14 +302,14 @@
                 <div class="subtitle">Current sync operation status</div>
             </div>
             <div class="status-card">
+                <h3>Total Emblems</h3>
+                <div class="value" id="totalEmblems">-</div>
+                <div class="subtitle">Emblems in catalog</div>
+            </div>
+            <div class="status-card">
                 <h3>Rarity Data</h3>
                 <div class="value" id="rarityData">-</div>
                 <div class="subtitle">Emblems with rarity data</div>
-            </div>
-            <div class="status-card">
-                <h3>Next Action</h3>
-                <div class="value" id="nextAction">-</div>
-                <div class="subtitle">What needs to happen next</div>
             </div>
         </div>
 
@@ -484,11 +484,11 @@
             syncStatusEl.textContent = status.sync_status || 'pending';
             syncStatusEl.className = `sync-status ${status.sync_status || 'pending'}`;
             
+            document.getElementById('totalEmblems').textContent = 
+                status.catalog_emblems || 0;
+            
             document.getElementById('rarityData').textContent = 
                 `${status.rarity_stats?.with_data || 0} / ${(status.rarity_stats?.with_data || 0) + (status.rarity_stats?.without_data || 0)}`;
-            
-            document.getElementById('nextAction').textContent = 
-                status.next_action === 'trigger_sync' ? 'Sync Needed' : 'No Action Required';
 
             // Update progress display if available
             if (status.progress) {
@@ -500,22 +500,22 @@
             const bannerTriggerSync = document.getElementById('bannerTriggerSync');
             const bannerPopulate = document.getElementById('bannerPopulate');
             
-            if (status.next_action === 'populate_catalog'){
+            if (status.catalog_emblems === 0) {
                 actionBanner.style.display = 'flex';
                 actionBanner.className = 'action-banner urgent';
-                document.getElementById('bannerMessage').textContent = status.message || 'Catalog is empty. Populate the catalog to proceed.';
+                document.getElementById('bannerMessage').textContent = 'Catalog is empty. Populate the catalog to proceed.';
                 bannerTriggerSync.style.display = 'none';
                 bannerPopulate.style.display = 'inline-block';
-            } else if (status.progress?.isRunning){
+            } else if (status.progress?.isRunning) {
                 actionBanner.style.display = 'flex';
                 actionBanner.className = 'action-banner';
                 document.getElementById('bannerMessage').textContent = 'Sync is currently running. Please wait for completion.';
                 bannerTriggerSync.style.display = 'none';
                 bannerPopulate.style.display = 'none';
-            } else if (status.should_sync_today){
+            } else if (status.should_sync_today) {
                 actionBanner.style.display = 'flex';
                 actionBanner.className = 'action-banner urgent';
-                document.getElementById('bannerMessage').textContent = status.message || 'Daily sync needs to be triggered to get emblem rarity data.';
+                document.getElementById('bannerMessage').textContent = 'Daily sync needs to be triggered to get emblem rarity data.';
                 bannerTriggerSync.style.display = 'inline-block';
                 bannerPopulate.style.display = 'none';
             } else {
