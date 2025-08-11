@@ -47,8 +47,27 @@ export async function launchBrowser(){
 }
 
 function extractPct(text){
-  const pats = [/Found by\s+(\d{1,3}(?:\.\d+)?)%/i, /Community Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i];
+  const pats = [
+    /Community\s*Rarity[\s\S]{0,200}?(\d{1,3}(?:\.\d+)?)%/i,
+    /Found\s*by\s+(\d{1,3}(?:\.\d+)?)%/i,
+    /rarity[\s\S]{0,100}?([0-9]{1,3}(?:\.[0-9]+)?)%/i,
+    /"rarity"\s*:\s*\{[\s\S]*?"pct"\s*:\s*([0-9]{1,3}(?:\.[0-9]+)?)/i
+  ];
   for (const re of pats){ const m = text.match(re); if (m) return parseFloat(m[1]); }
+  return null;
+}
+
+async function waitForPct(page, timeoutMs=20000){
+  const start = Date.now();
+  while(Date.now()-start < timeoutMs){
+    try{
+      const txt = await page.evaluate(() => document.body.innerText || document.body.textContent || "");
+      const html = await page.content();
+      const pct = extractPct(txt) ?? extractPct(html);
+      if (pct != null) return pct;
+    }catch{}
+    await page.waitForTimeout(1000);
+  }
   return null;
 }
 
@@ -59,14 +78,23 @@ async function scrapeOnce(itemHash){
   const url = `https://www.light.gg/db/items/${itemHash}/`;
   let res = { percent: null, label: "light.gg", source: url };
   try{
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
     const title = await page.title();
     if (/just a moment|attention required/i.test(title)){
-      await page.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "3000"));
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+      await page.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "4000"));
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
     }
-    const html = await page.content();
-    const pct = extractPct(html);
+    let pct = await waitForPct(page, Number(process.env.LIGHTGG_WAIT_MS || "20000"));
+    // Fallback: allow styles/images on a fresh page and retry once
+    if (pct == null){
+      try{
+        const p2 = await ctx.newPage();
+        await p2.unroute('**/*').catch(()=>{});
+        await p2.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        pct = await waitForPct(p2, 15000);
+        await p2.close();
+      }catch{}
+    }
     res = { percent: pct, label: pct != null ? "light.gg Community" : "light.gg", source: url };
   }catch(e){}
   try{ await page.close(); }catch{}
