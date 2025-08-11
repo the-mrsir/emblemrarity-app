@@ -67,13 +67,21 @@ let data = [];
 let filtered = [];
 let threshold = null;
 let snapshot = {};
+let snapshotLoaded = false;
 
 // Load snapshot (prefill % instantly if available)
-fetch("/rarity-snapshot.json").then(r=>r.ok?r.json():[]).then(arr => {
-  (arr || []).forEach(r => { snapshot[r.itemHash] = r; });
-}).catch(()=>{});
+fetch("/rarity-snapshot.json")
+  .then(r=>r.ok?r.json():[])
+  .then(arr => {
+    (arr || []).forEach(r => { snapshot[r.itemHash] = r; });
+    snapshotLoaded = true;
+    // if data already present, seed and re-render
+    if (data.length) { seedFromSnapshot(); render(); }
+  })
+  .catch(()=>{});
 
 // Lazy rarity fetch for visible cards (cache-first server will be instant)
+// Also: update data + auto resort when a new % arrives
 const io = new IntersectionObserver((entries) => {
   entries.forEach(async (entry) => {
     if (!entry.isIntersecting) return;
@@ -94,9 +102,29 @@ const io = new IntersectionObserver((entries) => {
         const days = Math.floor(ageMs / (1000*60*60*24));
         upd.textContent = days > 0 ? `Updated ${days}d ago` : "Updated today";
       }
+      // Update data & resort if sorting by rarity
+      const idx = data.findIndex(x => String(x.itemHash) === String(hash));
+      if (idx >= 0 && r && r.percent != null) {
+        data[idx].rarityPercent = r.percent;
+        data[idx].rarityLabel = r.label;
+        data[idx].rarityUpdatedAt = r.updatedAt;
+        if (sortSel.value === "rarity") render();
+      }
     } catch {}
   });
 }, { rootMargin: "200px" });
+
+function seedFromSnapshot(){
+  let touched = false;
+  data = data.map(d => {
+    if (d.rarityPercent == null) {
+      const s = snapshot[d.itemHash];
+      if (s && s.percent != null) { touched = true; return {...d, rarityPercent: s.percent, rarityLabel: s.label, rarityUpdatedAt: s.updatedAt}; }
+    }
+    return d;
+  });
+  return touched;
+}
 
 function render() {
   grid.innerHTML = "";
@@ -143,6 +171,51 @@ function render() {
   document.querySelectorAll(".card").forEach(c => io.observe(c));
 }
 
+// Background prefetch of all missing rarities (so you don't have to scroll to trigger)
+async function prefetchMissing(conc=6) {
+  const todo = data.filter(d => d.rarityPercent == null).map(d => d.itemHash);
+  let i=0;
+  async function worker() {
+    while (i < todo.length) {
+      const h = todo[i++];
+      try {
+        const r = await fetch(`/api/rarity?hash=${encodeURIComponent(h)}`).then(r=>r.json());
+        const j = data.findIndex(x => x.itemHash == h);
+        if (j >= 0 && r && r.percent != null) {
+          data[j].rarityPercent = r.percent;
+          data[j].rarityLabel = r.label;
+          data[j].rarityUpdatedAt = r.updatedAt;
+          if (sortSel.value === "rarity") render();
+        }
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({length: Math.min(conc, todo.length)}, worker));
+}
+
+async function loadData() {
+  statusEl.textContent = "Fetching your emblems...";
+  const json = await fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`).then(r=>r.json());
+  data = json.emblems || [];
+  if (!data.length){ statusEl.textContent="No emblems found."; return; }
+
+  // Seed from snapshot before first render (if already loaded)
+  seedFromSnapshot();
+  render();
+
+  // If snapshot was late, seed again once it arrives
+  if (!snapshotLoaded) {
+    const iv = setInterval(() => {
+      if (snapshotLoaded) { clearInterval(iv); if (seedFromSnapshot() && sortSel.value === "rarity") render(); }
+    }, 200);
+    setTimeout(()=>clearInterval(iv), 3000);
+  }
+
+  // Kick off background prefetch so values fill in even if not scrolled
+  prefetchMissing();
+}
+
+const chips = Array.from(document.querySelectorAll(".chip"));
 chips.forEach(ch => {
   ch.addEventListener("click", () => {
     chips.forEach(c => c.classList.remove("active"));
@@ -152,14 +225,6 @@ chips.forEach(ch => {
     render();
   });
 });
-
-async function loadData() {
-  statusEl.textContent = "Fetching your emblems...";
-  const json = await fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`).then(r=>r.json());
-  data = json.emblems || [];
-  if (!data.length){ statusEl.textContent="No emblems found."; return; }
-  render();
-}
 
 if (sid) {
   loginBtn.style.display = "none";

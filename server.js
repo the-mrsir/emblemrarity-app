@@ -282,13 +282,13 @@ async function getOwnedEmblemItemHashes(profile) {
   return [...new Set(emblemHashes)];
 }
 
-// --------------- Playwright rarity ---------------
+// --------------- Playwright rarity with throttle ---------------
 let browser;
 let lastScrapeAt = 0;
 let activeScrapes = 0;
 const scrapeQueue = [];
-const MAX_CONC = Number(RARITY_CONCURRENCY);
-const MIN_GAP = Number(RARITY_MIN_GAP_MS);
+const MAX_CONC = Number(process.env.RARITY_CONCURRENCY || "2");
+const MIN_GAP = Number(process.env.RARITY_MIN_GAP_MS || "200");
 
 async function ensureBrowser() {
   if (!browser) {
@@ -318,7 +318,7 @@ async function doScrape(itemHash) {
     await pg.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     const title = await pg.title();
     if (/just a moment|attention required/i.test(title)) {
-      await pg.waitForTimeout(Number(LIGHTGG_RETRY_MS));
+      await pg.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "4000"));
       await pg.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
     }
     const text = await pg.evaluate(() => document.body.innerText || document.body.textContent || "");
@@ -351,30 +351,28 @@ async function runQueue() {
   finally { activeScrapes--; runQueue(); }
 }
 
-const rarityInflight = new Map();
-
-async function fetchRarityNetwork(itemHash) {
-  // throttle via queue
-  return scheduleScrape(itemHash);
-}
-
 async function refreshRarityForce(itemHash) {
-  const r = await fetchRarityNetwork(itemHash);
+  const r = await scheduleScrape(itemHash);
   setRarity.run(itemHash, r.percent, r.label, r.source, nowSec());
   return r;
 }
 
 function shouldRefresh(row, now=nowSec()) {
-  const NULL_TTL = Number(LIGHTGG_NULL_TTL);
-  const POS_TTL  = Number(LIGHTGG_TTL);
+  const NULL_TTL = Number(process.env.LIGHTGG_NULL_TTL || "1800");
+  const POS_TTL  = Number(process.env.LIGHTGG_TTL || "2592000");
   const age = now - (row.updatedAt || 0);
   return (row.percent == null && age >= NULL_TTL) || (row.percent != null && age >= POS_TTL);
 }
 
-/** Cache-first rarity:
- * - If cached, return instantly and queue a background refresh if stale.
- * - If not cached, scrape once and store.
- */
+// Cache-first rarity
+const refreshQueue = new Set();
+async function queueRefresh(hash) {
+  if (refreshQueue.has(hash)) return;
+  refreshQueue.add(hash);
+  try { await refreshRarityForce(hash); }
+  catch (e) { logErr(`queueRefresh ${hash}`, e); }
+  finally { refreshQueue.delete(hash); }
+}
 async function getRarityCached(hash) {
   const row = getRarity.get(hash);
   if (row) {
@@ -383,16 +381,6 @@ async function getRarityCached(hash) {
   }
   const r = await refreshRarityForce(hash);
   return { ...r, updatedAt: nowSec() };
-}
-
-// Background refresh queue (no stampede)
-const refreshQueue = new Set();
-async function queueRefresh(hash) {
-  if (refreshQueue.has(hash)) return;
-  refreshQueue.add(hash);
-  try { await refreshRarityForce(hash); }
-  catch (e) { logErr(`queueRefresh ${hash}`, e); }
-  finally { refreshQueue.delete(hash); }
 }
 
 // --------------- Nightly bulk refresh + snapshot ---------------
@@ -406,7 +394,6 @@ function writeSnapshot() {
     logErr("writeSnapshot", e);
   }
 }
-
 async function refreshAllRarities(limit = null) {
   const rows = listCatalog.all();
   const hashes = rows.map(r => r.itemHash);
@@ -420,7 +407,6 @@ async function refreshAllRarities(limit = null) {
   writeSnapshot();
   logInfo(`Nightly refresh done. Updated ${ok}/${target.length}`);
 }
-
 if (CRON_ENABLED === "true" && REFRESH_CRON) {
   try {
     cron.schedule(REFRESH_CRON, () => {
@@ -432,7 +418,6 @@ if (CRON_ENABLED === "true" && REFRESH_CRON) {
   }
 }
 
-// Snapshot route with caching headers
 app.get("/rarity-snapshot.json", (req, res) => {
   try {
     const fp = path.join(__dirname, "public", "rarity-snapshot.json");
@@ -441,15 +426,13 @@ app.get("/rarity-snapshot.json", (req, res) => {
     res.setHeader("Content-Type", "application/json");
     res.setHeader("Cache-Control", "public, max-age=86400, immutable");
     res.send(data);
-  } catch (e) {
-    logErr("snapshot", e); res.json([]);
-  }
+  } catch (e) { logErr("snapshot", e); res.json([]); }
 });
 
-// Admin: force full refresh & snapshot (no user data). Protect with ADMIN_KEY.
+// Admin: force refresh + snapshot
 app.post("/admin/refresh", express.json(), async (req, res) => {
   try {
-    if (!ADMIN_KEY || req.headers["x-admin-key"] !== ADMIN_KEY) return res.status(401).json({ error: "unauthorized" });
+    if (!process.env.ADMIN_KEY || req.headers["x-admin-key"] !== process.env.ADMIN_KEY) return res.status(401).json({ error: "unauthorized" });
     const limit = req.body?.limit ? Number(req.body.limit) : null;
     await refreshAllRarities(limit);
     const { nulls, nonnull } = countRarity.get() || {};
@@ -469,7 +452,6 @@ app.get("/api/emblems", async (req, res) => {
     const hashes = await getOwnedEmblemItemHashes(profile);
     if (!hashes.length) return res.json({ emblems: [] });
 
-    // Build rows primarily from catalog, include rarityUpdatedAt
     const rows = [];
     const missing = [];
     for (const h of hashes) {
@@ -488,7 +470,6 @@ app.get("/api/emblems", async (req, res) => {
         sourceUrl: rc?.source ?? null
       });
     }
-    // Resolve some missing now for better UX
     for (const h of missing.slice(0,48)) {
       try {
         const item = await getEntity("DestinyInventoryItemDefinition", h);
@@ -502,7 +483,6 @@ app.get("/api/emblems", async (req, res) => {
         }
       } catch {}
     }
-    // Background fill the rest
     (async () => {
       for (const h of missing.slice(48)) {
         try {
@@ -514,9 +494,7 @@ app.get("/api/emblems", async (req, res) => {
       }
     })();
 
-    // Sort by rarity
     rows.sort((a,b)=> (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
-
     res.setHeader("Cache-Control", "no-store");
     res.json({ emblems: rows });
   } catch (e) {
@@ -525,7 +503,6 @@ app.get("/api/emblems", async (req, res) => {
   }
 });
 
-// Rarity API: cache-first, background refresh if stale
 app.get("/api/rarity", async (req, res) => {
   try {
     const hash = Number(req.query.hash);
@@ -539,16 +516,14 @@ app.get("/api/rarity", async (req, res) => {
   }
 });
 
-// Stats (no user info)
 app.get("/stats", (req, res) => {
   try {
     const cat = listCatalog.all().length;
     const rc = countRarity.get() || {};
-    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: MAX_CONC, minGapMs: MIN_GAP }});
+    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: Number(process.env.RARITY_CONCURRENCY||"2"), minGapMs: Number(process.env.RARITY_MIN_GAP_MS||"200") }});
   } catch (e) { logErr("stats", e); res.status(500).json({ error: "stats error" }); }
 });
 
-// UI
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 process.on("SIGTERM", async () => { try { if (browser) await browser.close(); } catch {} process.exit(0); });
