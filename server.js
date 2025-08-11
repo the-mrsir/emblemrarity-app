@@ -56,7 +56,8 @@ app.get("/rarity-snapshot.json", (req, res) => {
     if (!fs.existsSync(fp)) return res.json([]);
     const data = fs.readFileSync(fp, "utf-8");
     res.setHeader("Content-Type", "application/json");
-    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    // Serve as no-store so admin "Write Snapshot" is immediately visible
+    res.setHeader("Cache-Control", "no-store, must-revalidate");
     return res.send(data);
   } catch { return res.json([]); }
 });
@@ -171,6 +172,7 @@ async function performDailySync() {
   
   try {
     log.info("Starting daily emblem rarity sync...");
+    addActivity('info', 'Sync started', {});
     updateSyncStatus.run(today, now, 0, "in_progress");
     
     updateProgress({
@@ -271,11 +273,13 @@ async function performDailySync() {
     writeSnapshot();
     
     log.info({ total: emblemHashes.length, success: successCount }, "Daily sync completed");
+    addActivity('info', 'Sync completed', { total: emblemHashes.length, success: successCount });
     
   } catch (error) {
     log.error({ error: error.message }, "Daily sync failed");
     updateSyncStatus.run(today, now, 0, "failed");
     updateProgress({ isRunning: false });
+    addActivity('error', 'Sync failed', { error: error.message });
   }
 }
 
@@ -293,6 +297,7 @@ async function fillMissingRarity() {
     if (!hashes.length) { log.info("No missing rarity rows"); return; }
 
     log.info({ missing: hashes.length }, "Starting fillMissingRarity");
+    addActivity('info', 'Fill missing started', { missing: hashes.length });
     updateProgress({ isRunning: true, current: 0, total: hashes.length, currentEmblem: null, startTime: Date.now() });
     try { await launchBrowser(); } catch (e) { log.error({ err:e?.message }, "launchBrowser failed"); updateProgress({ isRunning:false }); return; }
 
@@ -321,9 +326,11 @@ async function fillMissingRarity() {
     updateSyncStatus.run(date, now, successCount, "completed");
     writeSnapshot();
     log.info({ missingProcessed: processed, success: successCount }, "fillMissingRarity completed");
+    addActivity('info', 'Fill missing completed', { processed, success: successCount });
   } catch (e) {
     log.error({ error:e?.message }, "fillMissingRarity failed");
     updateProgress({ isRunning:false });
+    addActivity('error', 'Fill missing failed', { error: e?.message });
   }
 }
 
