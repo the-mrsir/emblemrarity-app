@@ -52,7 +52,72 @@ app.get("/rarity-snapshot.json", (req, res) => {
   } catch { return res.json([]); }
 });
 
-// health
+
+
+const BUNGIE = axios.create({
+  baseURL: "https://www.bungie.net/Platform",
+  headers: { "X-API-Key": BUNGIE_API_KEY },
+  timeout: 20000
+});
+
+function normKey(v){ try { return (v==null?"":String(v)).trim().replace(/^(['"])(.*)\1$/, "$2"); } catch { return ""; } }
+function isAdmin(req){
+  const key = normKey(ADMIN_KEY);
+  if (!key) return false;
+  const hdr = normKey(req.headers["x-admin-key"] || req.headers["x-admin_key"]);
+  const allowQuery = String(ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
+  const q = allowQuery ? normKey((req.query && req.query.key) || (req.body && req.body.key)) : "";
+  return (hdr && hdr === key) || (q && q === key);
+}
+
+// ---------------- DB ----------------
+const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "cache.db");
+
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.exec(`
+CREATE TABLE IF NOT EXISTS collectible_item (
+  collectibleHash INTEGER PRIMARY KEY,
+  itemHash INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS emblem_catalog (
+  itemHash INTEGER PRIMARY KEY,
+  name TEXT,
+  icon TEXT
+);
+CREATE TABLE IF NOT EXISTS rarity_cache (
+  itemHash INTEGER PRIMARY KEY,
+  percent REAL,
+  label TEXT,
+  source TEXT,
+  updatedAt INTEGER
+);
+CREATE TABLE IF NOT EXISTS daily_sync_status (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  last_sync_date TEXT,
+  last_sync_timestamp INTEGER,
+  total_emblems INTEGER,
+  sync_status TEXT
+);
+`);
+
+// Initialize daily sync status if empty
+db.exec(`INSERT OR IGNORE INTO daily_sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')`);
+
+const setCollectible = db.prepare("INSERT INTO collectible_item (collectibleHash,itemHash) VALUES (?,?) ON CONFLICT(collectibleHash) DO UPDATE SET itemHash=excluded.itemHash");
+const getCollectible = db.prepare("SELECT itemHash FROM collectible_item WHERE collectibleHash=?");
+const upsertCatalog = db.prepare("INSERT INTO emblem_catalog (itemHash,name,icon) VALUES (?,?,?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon)");
+const getCatalog = db.prepare("SELECT itemHash,name,icon FROM emblem_catalog WHERE itemHash=?");
+const listCatalog = db.prepare("SELECT itemHash FROM emblem_catalog");
+const getRarity = db.prepare("SELECT percent,label,source,updatedAt FROM rarity_cache WHERE itemHash=?");
+const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,source,updatedAt) VALUES (?,?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET percent=excluded.percent,label=excluded.label,source=excluded.source,updatedAt=excluded.updatedAt");
+const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE 0 END) as nulls, SUM(CASE WHEN percent IS NOT NULL THEN 1 ELSE 0 END) as nonnull FROM rarity_cache");
+const getSyncStatus = db.prepare("SELECT last_sync_date, last_sync_timestamp, total_emblems, sync_status FROM daily_sync_status WHERE id = 1");
+const updateSyncStatus = db.prepare("UPDATE daily_sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
+
+// ---------------- Health Endpoints ----------------
 app.get("/health", (req,res)=>{
   try {
     // Check database connectivity
@@ -124,69 +189,6 @@ app.get("/health/detailed", (req,res)=>{
     });
   }
 });
-
-const BUNGIE = axios.create({
-  baseURL: "https://www.bungie.net/Platform",
-  headers: { "X-API-Key": BUNGIE_API_KEY },
-  timeout: 20000
-});
-
-function normKey(v){ try { return (v==null?"":String(v)).trim().replace(/^(['"])(.*)\1$/, "$2"); } catch { return ""; } }
-function isAdmin(req){
-  const key = normKey(ADMIN_KEY);
-  if (!key) return false;
-  const hdr = normKey(req.headers["x-admin-key"] || req.headers["x-admin_key"]);
-  const allowQuery = String(ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
-  const q = allowQuery ? normKey((req.query && req.query.key) || (req.body && req.body.key)) : "";
-  return (hdr && hdr === key) || (q && q === key);
-}
-
-// ---------------- DB ----------------
-const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "cache.db");
-
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-db.exec(`
-CREATE TABLE IF NOT EXISTS collectible_item (
-  collectibleHash INTEGER PRIMARY KEY,
-  itemHash INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS emblem_catalog (
-  itemHash INTEGER PRIMARY KEY,
-  name TEXT,
-  icon TEXT
-);
-CREATE TABLE IF NOT EXISTS rarity_cache (
-  itemHash INTEGER PRIMARY KEY,
-  percent REAL,
-  label TEXT,
-  source TEXT,
-  updatedAt INTEGER
-);
-CREATE TABLE IF NOT EXISTS daily_sync_status (
-  id INTEGER PRIMARY KEY DEFAULT 1,
-  last_sync_date TEXT,
-  last_sync_timestamp INTEGER,
-  total_emblems INTEGER,
-  sync_status TEXT
-);
-`);
-
-// Initialize daily sync status if empty
-db.exec(`INSERT OR IGNORE INTO daily_sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')`);
-
-const setCollectible = db.prepare("INSERT INTO collectible_item (collectibleHash,itemHash) VALUES (?,?) ON CONFLICT(collectibleHash) DO UPDATE SET itemHash=excluded.itemHash");
-const getCollectible = db.prepare("SELECT itemHash FROM collectible_item WHERE collectibleHash=?");
-const upsertCatalog = db.prepare("INSERT INTO emblem_catalog (itemHash,name,icon) VALUES (?,?,?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon)");
-const getCatalog = db.prepare("SELECT itemHash,name,icon FROM emblem_catalog WHERE itemHash=?");
-const listCatalog = db.prepare("SELECT itemHash FROM emblem_catalog");
-const getRarity = db.prepare("SELECT percent,label,source,updatedAt FROM rarity_cache WHERE itemHash=?");
-const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,source,updatedAt) VALUES (?,?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET percent=excluded.percent,label=excluded.label,source=excluded.source,updatedAt=excluded.updatedAt");
-const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE 0 END) as nulls, SUM(CASE WHEN percent IS NOT NULL THEN 1 ELSE 0 END) as nonnull FROM rarity_cache");
-const getSyncStatus = db.prepare("SELECT last_sync_date, last_sync_timestamp, total_emblems, sync_status FROM daily_sync_status WHERE id = 1");
-const updateSyncStatus = db.prepare("UPDATE daily_sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
 
 // ---------------- Rarity (ONE SYSTEM ONLY) ----------------
 async function getRarityCached(itemHash){
@@ -550,22 +552,6 @@ async function getOwnedEmblemItemHashes(profile){
     return cats.includes(19) ? ih : null;
   })).filter(Boolean);
   return [...new Set(emblemHashes)];
-}
-
-// ---------------- Rarity (database-first) ----------------
-async function getRarityCached(itemHash){
-  const row = getRarity.get(itemHash);
-  if (row && row.percent !== null) {
-    return { percent: row.percent, label: row.label, source: row.source, updatedAt: row.updatedAt };
-  }
-  
-  // If no rarity data, check if we should sync today
-  if (await shouldSyncToday()) {
-    log.info("No rarity data found and daily sync needed, triggering sync");
-    performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
-  }
-  
-  return { percent: null, label: "light.gg", source: `https://www.light.gg/db/items/${itemHash}/`, updatedAt: null };
 }
 
 // snapshot writer with debounce
