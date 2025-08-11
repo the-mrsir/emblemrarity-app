@@ -5,8 +5,8 @@ let active = 0;
 const MAX_CONC = Number(process.env.RARITY_CONCURRENCY || "2");
 const MIN_GAP = Number(process.env.RARITY_MIN_GAP_MS || "200");
 const COOLDOWN_MS = Number(process.env.RARITY_COOLDOWN_MS || "180000");
-const BATCH_SIZE = Number(process.env.RARITY_BATCH_SIZE || "3");
-const BATCH_INTERVAL_MS = Number(process.env.RARITY_BATCH_INTERVAL_MS || "180000");
+const BATCH_SIZE = Number(process.env.RARITY_BATCH_SIZE || "2");
+const BATCH_INTERVAL_MS = Number(process.env.RARITY_BATCH_INTERVAL_MS || "300000");
 let lastAt = 0;
 let cooldownUntil = 0;
 let recent403 = 0;
@@ -110,34 +110,80 @@ async function scrapeOnce(itemHash){
   await launchBrowser();
   if (!ctx) { await launchBrowser(); }
   const page = await ctx.newPage();
-  const url = `https://www.light.gg/db/items/${itemHash}/`;
-  let res = { percent: null, label: "light.gg", source: url, status: null, reason: null };
+  
+  // Try emblem.report first (faster, less rate limiting)
+  const emblemReportUrl = `https://emblem.report/emblem/${itemHash}`;
+  let res = { percent: null, label: "emblem.report", source: emblemReportUrl, status: null, reason: null };
+  
   try{
-    const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
-    const title = await page.title();
+    const resp = await page.goto(emblemReportUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
     res.status = resp ? resp.status() : null;
+    
+    if (res.status === 200) {
+      // Extract rarity from emblem.report
+      const pct = await page.evaluate(() => {
+        try {
+          // Look for rarity percentage on emblem.report
+          const rarityEl = document.querySelector('[data-testid="rarity"], .rarity, [class*="rarity"]');
+          if (rarityEl) {
+            const text = rarityEl.textContent || '';
+            const match = text.match(/(\d+(?:\.\d+)?)%/);
+            if (match) return parseFloat(match[1]);
+          }
+          
+          // Fallback: search all text for percentage patterns
+          const bodyText = document.body.textContent || '';
+          const patterns = [
+            /Rarity[\s\S]*?(\d+(?:\.\d+)?)%/i,
+            /(\d+(?:\.\d+)?)%[\s\S]*?rarity/i,
+            /Redeemed[\s\S]*?(\d+(?:\.\d+)?)%/i
+          ];
+          for (const pattern of patterns) {
+            const match = bodyText.match(pattern);
+            if (match) return parseFloat(match[1]);
+          }
+        } catch {}
+        return null;
+      });
+      
+      if (pct !== null) {
+        res = { ...res, percent: pct, label: "emblem.report" };
+        await page.close();
+        return res;
+      }
+    }
+  } catch(e) {
+    res.reason = e?.message || 'emblem_report_error';
+  }
+  
+  // Fallback to light.gg if emblem.report fails
+  try {
+    const lightggUrl = `https://www.light.gg/db/items/${itemHash}/`;
+    res.source = lightggUrl;
+    res.label = "light.gg";
+    
+    const resp2 = await page.goto(lightggUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
+    const title = await page.title();
+    res.status = resp2 ? resp2.status() : null;
+    
     if (/just a moment|attention required/i.test(title)){
       await page.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "4000"));
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
+      await page.goto(lightggUrl, { waitUntil: "domcontentloaded", timeout: 25000 });
     }
-    let pct = await waitForPct(page, Number(process.env.LIGHTGG_WAIT_MS || "20000"));
-    // Fallback: allow styles/images on a fresh page and retry once
-    if (pct == null){
-      try{
-        const p2 = await ctx.newPage();
-        await p2.unroute('**/*').catch(()=>{});
-        await p2.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        pct = await waitForPct(p2, 15000);
-        await p2.close();
-      }catch(e){ res.reason = res.reason || 'retry_failed'; }
-    }
-    if (pct == null){
+    
+    const pct = await waitForPct(page, Number(process.env.LIGHTGG_WAIT_MS || "15000"));
+    
+    if (pct !== null) {
+      res = { ...res, percent: pct, label: "light.gg Community" };
+    } else {
       if (res.status && res.status >= 400) res.reason = `http_${res.status}`;
       else if (/just a moment|attention required/i.test(title)) res.reason = 'cf_challenge';
       else res.reason = res.reason || 'no_match';
     }
-    res = { ...res, percent: pct, label: pct != null ? "light.gg Community" : "light.gg", source: url };
-  }catch(e){ res.reason = res.reason || (e?.message || 'error'); }
+  } catch(e) {
+    res.reason = res.reason || (e?.message || 'error');
+  }
+  
   try{ await page.close(); }catch{}
   return res;
 }
