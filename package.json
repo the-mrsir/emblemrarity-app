@@ -1,6 +1,6 @@
 {
   "name": "emblemrarity-app",
-  "version": "6.2.0",
+  "version": "7.1.0",
   "type": "module",
   "scripts": {
     "start": "node server.js",
@@ -10,6 +10,7 @@
     "axios": "^1.7.2",
     "express": "^4.19.2",
     "playwright": "^1.46.0",
-    "better-sqlite3": "^9.4.3"
+    "better-sqlite3": "^9.4.3",
+    "node-cron": "^3.0.3"
   }
 }
