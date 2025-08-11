@@ -95,6 +95,10 @@ async function extractEmblemsFromManifest(manifestPath) {
     
     const emblems = [];
     let processed = 0;
+    let category19Count = 0;
+    let nameIconCount = 0;
+    
+    console.log(`Processing ${Object.keys(manifestData).length} items from manifest...`);
     
     // Process each item definition
     for (const [hash, item] of Object.entries(manifestData)) {
@@ -105,10 +109,12 @@ async function extractEmblemsFromManifest(manifestPath) {
       
       // Check if this is an emblem (category hash 19)
       if (item.itemCategoryHashes && item.itemCategoryHashes.includes(19)) {
+        category19Count++;
         const name = item.displayProperties?.name || null;
         const icon = item.secondaryIcon || item.displayProperties?.icon || null;
         
         if (name && icon) {
+          nameIconCount++;
           emblems.push({
             itemHash: parseInt(hash),
             name,
@@ -118,7 +124,30 @@ async function extractEmblemsFromManifest(manifestPath) {
       }
     }
     
-    console.log(`Found ${emblems.length} emblems in manifest`);
+    console.log(`\n📊 Extraction Results:`);
+    console.log(`   Total items processed: ${processed}`);
+    console.log(`   Items with category 19: ${category19Count}`);
+    console.log(`   Items with name & icon: ${nameIconCount}`);
+    console.log(`   Final emblem count: ${emblems.length}`);
+    
+    if (emblems.length === 0) {
+      console.log("\n⚠️  No emblems found! This might indicate:");
+      console.log("   - Manifest file is corrupted");
+      console.log("   - Category hash 19 is not correct");
+      console.log("   - Display properties are missing");
+      
+      // Show some sample items to debug
+      const sampleItems = Object.entries(manifestData).slice(0, 5);
+      console.log("\n🔍 Sample items from manifest:");
+      sampleItems.forEach(([hash, item]) => {
+        console.log(`   Hash: ${hash}`);
+        console.log(`   Categories: ${JSON.stringify(item.itemCategoryHashes)}`);
+        console.log(`   Name: ${item.displayProperties?.name || 'No name'}`);
+        console.log(`   Icon: ${item.secondaryIcon || item.displayProperties?.icon || 'No icon'}`);
+        console.log("   ---");
+      });
+    }
+    
     return emblems;
   } catch (error) {
     console.error("Failed to extract emblems:", error.message);
@@ -161,9 +190,23 @@ async function main() {
     const currentCount = countCatalog.get().count;
     console.log(`Current catalog has ${currentCount} emblems`);
     
-    if (currentCount > 0) {
-      console.log("Catalog already has data. Use --force to repopulate.");
+    const forceRepopulate = process.argv.includes('--force');
+    
+    if (currentCount > 0 && !forceRepopulate) {
+      console.log("\n⚠️  Catalog already has data!");
+      console.log("   If you want to repopulate, run:");
+      console.log("   npm run populate-catalog --force");
+      console.log("\n   Or if you want to continue with current data:");
+      console.log("   npm start");
       process.exit(0);
+    }
+    
+    if (forceRepopulate) {
+      console.log("\n🔄 Force flag detected - clearing existing data...");
+      db.exec("DELETE FROM emblem_catalog");
+      db.exec("DELETE FROM rarity_cache");
+      db.exec("UPDATE daily_sync_status SET last_sync_date = '', last_sync_timestamp = 0, total_emblems = 0, sync_status = 'pending'");
+      console.log("✅ Cleared existing catalog data");
     }
     
     // Get manifest
@@ -172,6 +215,8 @@ async function main() {
     // Download inventory item definitions
     const inventoryUrl = `https://www.bungie.net${manifest.inventoryItem.jsonWorldContentPaths.en}`;
     const inventoryFile = "inventory_items.json";
+    
+    console.log(`\n📥 Downloading inventory items from: ${inventoryUrl}`);
     
     if (!await downloadManifestFile(inventoryUrl, inventoryFile)) {
       throw new Error("Failed to download inventory items");
@@ -188,12 +233,15 @@ async function main() {
     const finalCount = await populateCatalog(emblems);
     
     console.log(`\n✅ Successfully populated emblem catalog with ${finalCount} emblems!`);
-    console.log("The daily sync system is now ready to fetch rarity data.");
+    console.log("\n🎯 Next steps:");
+    console.log("   1. Start the server: npm start");
+    console.log("   2. Go to admin panel: /admin/ui.html");
+    console.log("   3. Click 'Trigger Daily Sync' to get rarity data");
     
     // Clean up
     try {
       fs.unlinkSync(inventoryFile);
-      console.log("Cleaned up temporary files");
+      console.log("\n🧹 Cleaned up temporary files");
     } catch (e) {
       // Ignore cleanup errors
     }
@@ -228,15 +276,6 @@ Example:
   BUNGIE_API_KEY=your_key_here node populate_catalog.js
 `);
   process.exit(0);
-}
-
-if (process.argv.includes('--force')) {
-  console.log("Force flag detected - will repopulate catalog");
-  // Clear existing data
-  db.exec("DELETE FROM emblem_catalog");
-  db.exec("DELETE FROM rarity_cache");
-  db.exec("UPDATE daily_sync_status SET last_sync_date = '', last_sync_timestamp = 0, total_emblems = 0, sync_status = 'pending'");
-  console.log("Cleared existing catalog data");
 }
 
 main();

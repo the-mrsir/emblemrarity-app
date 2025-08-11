@@ -7,6 +7,7 @@
     "populate-catalog": "node populate_catalog.js",
     "debug": "node debug.js",
     "test": "node test-system.js",
+    "check-db": "node check-db.js",
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {

@@ -84,27 +84,8 @@ fetch("/rarity-snapshot.json").then(r=>r.ok?r.json():[]).then(arr=>{
   if (data.length) { seedFromSnapshot(); render(); }
 }).catch(()=>{});
 
-// Background prefetch of rarity for everything missing
-async function prefetchMissing(conc=6) {
-  const todo = data.filter(d => d.rarityPercent == null).map(d => d.itemHash);
-  let i=0;
-  async function worker() {
-    while (i < todo.length) {
-      const h = todo[i++];
-      try {
-        const r = await fetch(`/api/rarity?hash=${encodeURIComponent(h)}`).then(r=>r.json());
-        const j = data.findIndex(x => x.itemHash == h);
-        if (j >= 0 && r && r.percent != null) {
-          data[j].rarityPercent = r.percent;
-          data[j].rarityLabel = r.label;
-          data[j].rarityUpdatedAt = r.updatedAt;
-          if (sortSel.value === "rarity") render();
-        }
-      } catch {}
-    }
-  }
-  await Promise.all(Array.from({length: Math.min(conc, todo.length)}, worker));
-}
+// NO MORE INDIVIDUAL EMBLEM FETCHING - only use snapshot data from daily sync
+// The prefetchMissing function is removed - all data comes from snapshot
 
 const io = new IntersectionObserver((entries) => {
   entries.forEach(async (entry) => {
@@ -113,27 +94,31 @@ const io = new IntersectionObserver((entries) => {
     if (card.dataset.loaded) return;
     card.dataset.loaded = "1";
     const hash = card.dataset.hash;
-    try {
-      const r = await fetch(`/api/rarity?hash=${encodeURIComponent(hash)}`).then(r=>r.json());
-      const pct = (r && r.percent != null) ? (Number(r.percent).toFixed(4) + "%") : "Unknown";
+    
+    // Use snapshot data only - no API calls
+    const r = snapshot[hash];
+    if (r && r.percent != null) {
+      const pct = Number(r.percent).toFixed(4) + "%";
       const badge = card.querySelector(".badge");
       badge.textContent = `${badge.textContent.split("•")[0]}• ${pct}`;
       const meta = card.querySelector(".meta .label");
-      if (meta) meta.textContent = r?.label || "";
+      if (meta) meta.textContent = r.label || "";
       const upd = card.querySelector(".meta .updated");
-      if (upd && r?.updatedAt) {
+      if (upd && r.updatedAt) {
         const ageMs = Date.now() - (r.updatedAt * 1000);
         const days = Math.floor(ageMs / (1000*60*60*24));
         upd.textContent = days > 0 ? `Updated ${days}d ago` : "Updated today";
       }
+      
+      // Update data array with snapshot info
       const idx = data.findIndex(x => String(x.itemHash) === String(hash));
-      if (idx >= 0 && r && r.percent != null) {
+      if (idx >= 0) {
         data[idx].rarityPercent = r.percent;
         data[idx].rarityLabel = r.label;
         data[idx].rarityUpdatedAt = r.updatedAt;
         if (sortSel.value === "rarity") render();
       }
-    } catch {}
+    }
   });
 }, { rootMargin: "200px" });
 
@@ -210,7 +195,7 @@ async function loadData() {
   if (!data.length){ statusEl.textContent="No emblems found."; return; }
   seedFromSnapshot();
   render();
-  prefetchMissing();
+  // prefetchMissing(); // Removed as per new logic
 }
 
 if (sid) {
