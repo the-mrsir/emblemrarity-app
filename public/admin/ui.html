@@ -359,6 +359,7 @@
 
         <div class="actions" style="margin-top: 16px; display:flex; gap:8px;">
             <button id="triggerSync" class="btn btn-primary">Trigger Daily Sync</button>
+            <button id="scrapeMissing" class="btn">Fill Missing Rarity</button>
             <button id="writeSnapshot" class="btn">Write Snapshot</button>
             <button id="populateCatalog" class="btn">Populate Catalog</button>
         </div>
@@ -638,6 +639,20 @@
         if (elTriggerSync) elTriggerSync.addEventListener('click', triggerDailySync);
         const elWriteSnapshot = document.getElementById('writeSnapshot');
         if (elWriteSnapshot) elWriteSnapshot.addEventListener('click', writeSnapshot);
+        const elScrapeMissing = document.getElementById('scrapeMissing');
+        if (elScrapeMissing) elScrapeMissing.addEventListener('click', async ()=>{
+            if (isRefreshing) return;
+            setLoading(true);
+            try{
+                const r = await fetch('/admin/scrape-missing', { method:'POST', headers: { 'x-admin-key': prompt('Enter admin key:') || '' }});
+                const j = await r.json();
+                if (!r.ok) throw new Error(j?.error||'Failed to start');
+                showAlert('Started filling missing rarity','success');
+                startProgressMonitoring();
+                setTimeout(updateStatusDisplay, 2000);
+            }catch(e){ showAlert(e.message,'error'); }
+            finally{ setLoading(false); }
+        });
         const elRefreshBtn = document.getElementById('refreshBtn');
         if (elRefreshBtn) elRefreshBtn.addEventListener('click', () => {
             updateStatusDisplay();

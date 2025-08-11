@@ -111,6 +111,7 @@ const getCollectible = db.prepare("SELECT itemHash FROM collectibles WHERE colle
 const setCollectible = db.prepare("INSERT INTO collectibles (collectibleHash, itemHash) VALUES (?, ?) ON CONFLICT(collectibleHash) DO UPDATE SET itemHash = excluded.itemHash");
 const getSyncStatus = db.prepare("SELECT * FROM sync_status WHERE id = 1");
 const updateSyncStatus = db.prepare("UPDATE sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
+const listMissingRarity = db.prepare("SELECT itemHash FROM emblems WHERE percent IS NULL");
 
 // Global sync state
 let syncProgress = {
@@ -257,6 +258,54 @@ async function performDailySync() {
     log.error({ error: error.message }, "Daily sync failed");
     updateSyncStatus.run(today, now, 0, "failed");
     updateProgress({ isRunning: false });
+  }
+}
+
+// Fill only missing rarity rows (admin action)
+async function fillMissingRarity() {
+  if (syncProgress.isRunning) {
+    log.info("Sync already running, skipping fillMissingRarity");
+    return;
+  }
+  const today = new Date().toISOString().split('T')[0];
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const missingRows = listMissingRarity.all();
+    const hashes = missingRows.map(r => r.itemHash);
+    if (!hashes.length) { log.info("No missing rarity rows"); return; }
+
+    log.info({ missing: hashes.length }, "Starting fillMissingRarity");
+    updateProgress({ isRunning: true, current: 0, total: hashes.length, currentEmblem: null, startTime: Date.now() });
+    try { await launchBrowser(); } catch (e) { log.error({ err:e?.message }, "launchBrowser failed"); updateProgress({ isRunning:false }); return; }
+
+    let successCount = 0; let processed = 0; const batchSize = 200;
+    for (let i=0;i<hashes.length;i+=batchSize){
+      const batch = hashes.slice(i, i+batchSize);
+      const promises = batch.map((itemHash) => new Promise((resolve) => {
+        queueScrape(itemHash, (result) => {
+          try {
+            if (result && result.percent != null){
+              setEmblem.run(itemHash, null, null, result.percent, result.label || "light.gg Community", result.source || `https://www.light.gg/db/items/${itemHash}/`, now);
+              successCount++;
+            }
+          } finally { processed++; updateProgress({ current: processed, currentEmblem: `Processed ${itemHash}` }); resolve(); }
+        });
+      }));
+      try {
+        await Promise.race([ Promise.all(promises), new Promise((_,rej)=>setTimeout(()=>rej(new Error("batch timeout")), 10*60*1000)) ]);
+      } catch (e) { log.warn({ error:e?.message }, "fillMissing batch timeout"); }
+      await new Promise(r=>setTimeout(r,250));
+    }
+    updateProgress({ isRunning:false });
+    // Update sync status counts but don't change the date if already today
+    const status = getSyncStatus.get();
+    const date = status?.last_sync_date && status.last_sync_date === today ? status.last_sync_date : today;
+    updateSyncStatus.run(date, now, successCount, "completed");
+    writeSnapshot();
+    log.info({ missingProcessed: processed, success: successCount }, "fillMissingRarity completed");
+  } catch (e) {
+    log.error({ error:e?.message }, "fillMissingRarity failed");
+    updateProgress({ isRunning:false });
   }
 }
 
@@ -773,6 +822,18 @@ app.post("/admin/populate", async (req, res) => {
   } catch (error) {
     log.error({ error: error.message }, "Failed to start catalog population");
     res.status(500).json({ error: "Failed to start catalog population" });
+  }
+});
+
+// Admin: scrape only missing rarity rows
+app.post("/admin/scrape-missing", async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ error: "Unauthorized" });
+    if (syncProgress.isRunning) return res.status(409).json({ error: "Sync currently running" });
+    fillMissingRarity().catch(e=>log.error({ err:e?.message }, "background fillMissing failed"));
+    res.json({ ok:true, message:"Started filling missing rarity" });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to start" });
   }
 });
 
