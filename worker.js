@@ -22,16 +22,26 @@ function runQueue(){
 
 export async function launchBrowser(){
   if (!browser){
-    browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] });
+    browser = await chromium.launch({ headless: true, args: ["--no-sandbox","--disable-setuid-sandbox","--disable-gpu","--disable-dev-shm-usage"] });
   }
   if (!ctx){
     ctx = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
       locale: "en-US",
       timezoneId: "America/New_York",
-      viewport: { width: 1366, height: 768 },
+      viewport: { width: 1280, height: 720 },
       extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.google.com/" }
     });
+    // Block heavy resources to speed up loads
+    await ctx.route('**/*', (route) => {
+      const t = route.request().resourceType();
+      if (t === 'image' || t === 'media' || t === 'font' || t === 'stylesheet') return route.abort();
+      return route.continue();
+    });
+    ctx.setDefaultNavigationTimeout(15000);
+    ctx.setDefaultTimeout(15000);
+    // Warm the domain once (cookies/cf)
+    try { const p = await ctx.newPage(); await p.goto('https://www.light.gg/', { waitUntil: 'domcontentloaded', timeout: 10000 }); await p.close(); } catch {}
   }
   return browser;
 }
@@ -49,14 +59,14 @@ async function scrapeOnce(itemHash){
   const url = `https://www.light.gg/db/items/${itemHash}/`;
   let res = { percent: null, label: "light.gg", source: url };
   try{
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     const title = await page.title();
     if (/just a moment|attention required/i.test(title)){
-      await page.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "4000"));
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "3000"));
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     }
-    const text = await page.evaluate(() => document.body.innerText || document.body.textContent || "");
-    const pct = extractPct(text);
+    const html = await page.content();
+    const pct = extractPct(html);
     res = { percent: pct, label: pct != null ? "light.gg Community" : "light.gg", source: url };
   }catch(e){}
   try{ await page.close(); }catch{}
