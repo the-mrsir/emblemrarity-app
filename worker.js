@@ -63,7 +63,23 @@ async function waitForPct(page, timeoutMs=20000){
     try{
       const txt = await page.evaluate(() => document.body.innerText || document.body.textContent || "");
       const html = await page.content();
-      const pct = extractPct(txt) ?? extractPct(html);
+      // Try DOM-targeted extraction
+      const fromDom = await page.evaluate(() => {
+        try{
+          const rePct = /([0-9]{1,3}(?:\.[0-9]+)?)%/;
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+          while(walker.nextNode()){
+            const el = walker.currentNode;
+            const t = (el.textContent || '').trim();
+            if (/Community\s*Rarity/i.test(t)){
+              const m = t.match(rePct);
+              if (m) return parseFloat(m[1]);
+            }
+          }
+        }catch{}
+        return null;
+      });
+      const pct = fromDom ?? extractPct(txt) ?? extractPct(html);
       if (pct != null) return pct;
     }catch{}
     await page.waitForTimeout(1000);
@@ -76,10 +92,11 @@ async function scrapeOnce(itemHash){
   if (!ctx) { await launchBrowser(); }
   const page = await ctx.newPage();
   const url = `https://www.light.gg/db/items/${itemHash}/`;
-  let res = { percent: null, label: "light.gg", source: url };
+  let res = { percent: null, label: "light.gg", source: url, status: null, reason: null };
   try{
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
+    const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
     const title = await page.title();
+    res.status = resp ? resp.status() : null;
     if (/just a moment|attention required/i.test(title)){
       await page.waitForTimeout(Number(process.env.LIGHTGG_RETRY_MS || "4000"));
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 25000 });
@@ -93,10 +110,15 @@ async function scrapeOnce(itemHash){
         await p2.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
         pct = await waitForPct(p2, 15000);
         await p2.close();
-      }catch{}
+      }catch(e){ res.reason = res.reason || 'retry_failed'; }
     }
-    res = { percent: pct, label: pct != null ? "light.gg Community" : "light.gg", source: url };
-  }catch(e){}
+    if (pct == null){
+      if (res.status && res.status >= 400) res.reason = `http_${res.status}`;
+      else if (/just a moment|attention required/i.test(title)) res.reason = 'cf_challenge';
+      else res.reason = res.reason || 'no_match';
+    }
+    res = { ...res, percent: pct, label: pct != null ? "light.gg Community" : "light.gg", source: url };
+  }catch(e){ res.reason = res.reason || (e?.message || 'error'); }
   try{ await page.close(); }catch{}
   return res;
 }

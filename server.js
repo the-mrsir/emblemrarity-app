@@ -234,7 +234,7 @@ async function performDailySync() {
               addActivity('info', 'Rarity OK', { itemHash, percent: result.percent });
             }
             if (!result || result.percent === null) {
-              addActivity('warn', 'Rarity NULL', { itemHash });
+              addActivity('warn', 'Rarity NULL', { itemHash, reason: result?.reason, status: result?.status });
             }
           } catch (e) {
             log.warn({ itemHash, error: e?.message }, "Failed to persist rarity");
