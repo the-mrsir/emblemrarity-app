@@ -393,9 +393,16 @@
         function setLoading(loading) {
             isRefreshing = loading;
             document.body.classList.toggle('loading', loading);
-            document.getElementById('triggerSync').disabled = loading;
-            document.getElementById('refreshStatus').disabled = loading;
-            document.getElementById('writeSnapshot').disabled = loading;
+            const elTrigger = document.getElementById('triggerSync');
+            if (elTrigger) elTrigger.disabled = loading;
+            const elWrite = document.getElementById('writeSnapshot');
+            if (elWrite) elWrite.disabled = loading;
+            const elPopulate = document.getElementById('populateCatalog');
+            if (elPopulate) elPopulate.disabled = loading;
+            const elBannerTrigger = document.getElementById('bannerTriggerSync');
+            if (elBannerTrigger) elBannerTrigger.disabled = loading;
+            const elBannerPopulate = document.getElementById('bannerPopulate');
+            if (elBannerPopulate) elBannerPopulate.disabled = loading;
         }
 
         function formatTime(seconds) {
@@ -624,16 +631,21 @@
         }
 
         // Event listeners
-        document.getElementById('triggerSync').addEventListener('click', triggerDailySync);
-        document.getElementById('refreshStatus').addEventListener('click', updateStatusDisplay);
-        document.getElementById('writeSnapshot').addEventListener('click', writeSnapshot);
-        document.getElementById('refreshBtn').addEventListener('click', () => {
+        const elTriggerSync = document.getElementById('triggerSync');
+        if (elTriggerSync) elTriggerSync.addEventListener('click', triggerDailySync);
+        const elWriteSnapshot = document.getElementById('writeSnapshot');
+        if (elWriteSnapshot) elWriteSnapshot.addEventListener('click', writeSnapshot);
+        const elRefreshBtn = document.getElementById('refreshBtn');
+        if (elRefreshBtn) elRefreshBtn.addEventListener('click', () => {
             updateStatusDisplay();
             addLogEntry('Status refreshed manually', 'info');
         });
-        document.getElementById('bannerTriggerSync').addEventListener('click', triggerDailySync);
-        document.getElementById('populateCatalog').addEventListener('click', ()=>populateCatalog(true));
-        document.getElementById('bannerPopulate').addEventListener('click', ()=>populateCatalog(true));
+        const elBannerTriggerSync = document.getElementById('bannerTriggerSync');
+        if (elBannerTriggerSync) elBannerTriggerSync.addEventListener('click', triggerDailySync);
+        const elPopulateCatalog = document.getElementById('populateCatalog');
+        if (elPopulateCatalog) elPopulateCatalog.addEventListener('click', ()=>populateCatalog(true));
+        const elBannerPopulate = document.getElementById('bannerPopulate');
+        if (elBannerPopulate) elBannerPopulate.addEventListener('click', ()=>populateCatalog(true));
 
         // Initial load
         updateStatusDisplay();
