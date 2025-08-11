@@ -23,3 +23,7 @@ git push
   - `POST /admin/snapshot` – rewrite `rarity-snapshot.json` from the current cache.
 - `/stats` now shows `adminConfigured: true/false`.
 - Gentler Bungie fetch: `BUNGIE_CONCURRENCY` env (default 12).
+
+
+## v8.1.4
+- Fix: remove duplicate `chips` declaration in client JS (was causing "Identifier 'chips' has already been declared" and blocking login/emblem fetch).
