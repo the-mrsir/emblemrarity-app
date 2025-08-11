@@ -34,10 +34,12 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static("public"));
 
-// Serve snapshot
+// Serve snapshot (read from volume if present)
 app.get("/rarity-snapshot.json", (req, res) => {
-  const fp = path.join(__dirname, "public", "rarity-snapshot.json");
   try {
+    const volPath = SNAPSHOT_PATH;
+    const pubPath = path.join(__dirname, "public", "rarity-snapshot.json");
+    const fp = fs.existsSync(volPath) ? volPath : pubPath;
     if (!fs.existsSync(fp)) return res.json([]);
     const data = fs.readFileSync(fp, "utf-8");
     res.setHeader("Content-Type", "application/json");
@@ -66,6 +68,7 @@ function isAdmin(req) {
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "emblems.db");
+const SNAPSHOT_PATH = path.join(DATA_DIR, "rarity-snapshot.json");
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
@@ -178,47 +181,57 @@ async function performDailySync() {
       return;
     }
     
-    // Process emblems
+    // Process emblems in batches while letting the worker manage concurrency
     let successCount = 0;
-    
-    for (let i = 0; i < emblemHashes.length; i++) {
-      const itemHash = emblemHashes[i];
+    let processed = 0;
+    const batchSize = 200;
+
+    for (let i = 0; i < emblemHashes.length; i += batchSize) {
+      const batch = emblemHashes.slice(i, i + batchSize);
+      log.info({ batch: Math.floor(i / batchSize) + 1, size: batch.length }, "Queueing batch");
       
-      updateProgress({
-        current: i + 1,
-        currentEmblem: `Processing emblem ${itemHash}`
-      });
-      
-      try {
-        const result = await new Promise((resolve) => {
-          queueScrape(itemHash, resolve);
+      const promises = batch.map((itemHash) => new Promise((resolve) => {
+        updateProgress({ currentEmblem: `Queued ${itemHash}` });
+        queueScrape(itemHash, (result) => {
+          try {
+            if (result && result.percent !== null) {
+              setEmblem.run(
+                itemHash,
+                null,
+                null,
+                result.percent,
+                result.label || "light.gg Community",
+                result.source || `https://www.light.gg/db/items/${itemHash}/`,
+                now
+              );
+              successCount++;
+            }
+          } catch (e) {
+            log.warn({ itemHash, error: e?.message }, "Failed to persist rarity");
+          } finally {
+            processed++;
+            if (processed % 10 === 0) {
+              const percent = Math.round((processed / emblemHashes.length) * 100);
+              log.info({ progress: `${processed}/${emblemHashes.length} (${percent}%)`, success: successCount }, "Sync progress");
+            }
+            updateProgress({ current: processed, currentEmblem: `Processed ${itemHash}` });
+            resolve();
+          }
         });
-        
-        if (result && result.percent !== null) {
-          setEmblem.run(
-            itemHash,
-            null, // name - keep existing
-            null, // icon - keep existing
-            result.percent,
-            result.label || "light.gg Community",
-            result.source || `https://www.light.gg/db/items/${itemHash}/`,
-            now
-          );
-          successCount++;
-        }
-        
-        // Log progress every 10 emblems
-        if ((i + 1) % 10 === 0) {
-          const percent = Math.round(((i + 1) / emblemHashes.length) * 100);
-          log.info({ progress: `${i + 1}/${emblemHashes.length} (${percent}%)`, success: successCount }, "Sync progress");
-        }
-        
-        // Small delay between requests
-        await new Promise(resolve => setTimeout(resolve, 200));
-        
-      } catch (error) {
-        log.error({ itemHash, error: error.message }, "Failed to scrape emblem");
+      }));
+
+      // Wait for this batch to finish with a safety timeout
+      try {
+        await Promise.race([
+          Promise.all(promises),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("batch timeout")), 10 * 60 * 1000))
+        ]);
+      } catch (e) {
+        log.warn({ error: e?.message }, "Batch timed out; continuing");
       }
+
+      // tiny breather between batches
+      await new Promise((r) => setTimeout(r, 250));
     }
     
     // Update sync status
@@ -237,11 +250,11 @@ async function performDailySync() {
   }
 }
 
-// Write snapshot
+// Write snapshot (to volume)
 function writeSnapshot() {
   try {
     const rows = db.prepare("SELECT itemHash, percent, label, source, updatedAt FROM emblems WHERE percent IS NOT NULL").all();
-    fs.writeFileSync(path.join(__dirname, "public", "rarity-snapshot.json"), JSON.stringify(rows));
+    fs.writeFileSync(SNAPSHOT_PATH, JSON.stringify(rows));
     log.info({ count: rows.length }, "Snapshot written");
   } catch (error) {
     log.error({ error: error.message }, "Failed to write snapshot");
@@ -612,7 +625,17 @@ app.get("/health", (req, res) => {
       ok: true,
       timestamp: new Date().toISOString(),
       uptime: Math.round(process.uptime()),
-      database: "connected",
+      database: {
+        status: "connected",
+        path: DB_PATH,
+        size: fs.existsSync(DB_PATH) ? fs.statSync(DB_PATH).size : 0,
+        dataDir: DATA_DIR
+      },
+      snapshot: {
+        path: SNAPSHOT_PATH,
+        exists: fs.existsSync(SNAPSHOT_PATH),
+        size: fs.existsSync(SNAPSHOT_PATH) ? fs.statSync(SNAPSHOT_PATH).size : 0
+      },
       sync: {
         status: status?.sync_status || "unknown",
         lastSync: status?.last_sync_date || "never",

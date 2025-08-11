@@ -44,7 +44,6 @@
         <div class="header">
             <div class="brand"><div class="sig"></div><h1>Emblem Rarity</h1></div>
             <div style="display:flex; gap:8px; align-items:center;">
-              <a id="syncBtn" href="#" class="admin-link" style="display:none">Sync rarity</a>
               <a id="loginBtn" href="/login" class="admin-link">Login with Bungie</a>
             </div>
         </div>
@@ -153,7 +152,6 @@
                   </div>
                   <div class="links">
                     <a class="link" href="https://www.light.gg/db/items/${emblem.itemHash}/" target="_blank" rel="noopener">View on light.gg</a>
-                    <a class="link" href="#" onclick="triggerSingleScrape(${emblem.itemHash});return false;">Refresh rarity</a>
                   </div>
                 `;
                 
@@ -178,16 +176,7 @@
             await loadUserEmblems();
         }
 
-        // Manual refresh per-emblem (uses sync system; server will ignore if not allowed)
-        async function triggerSingleScrape(hash){
-            try{
-                const res = await fetch(`/api/rarity?hash=${hash}`);
-                if (res.ok){
-                    // Soft refresh user list to update percent shown
-                    await loadUserEmblems();
-                }
-            }catch{}
-        }
+        // no per-emblem refresh on main page
 
         // Start when page loads
         init();
