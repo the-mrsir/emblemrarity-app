@@ -321,7 +321,10 @@
                     <h4>Action Required</h4>
                     <p id="bannerMessage">Daily sync needs to be triggered to get emblem rarity data.</p>
                 </div>
+            </div>
+            <div class="banner-actions">
                 <button id="bannerTriggerSync" class="btn btn-primary">Trigger Sync Now</button>
+                <button id="bannerPopulate" class="btn">Populate Catalog</button>
             </div>
         </div>
 
@@ -354,10 +357,10 @@
             </div>
         </div>
 
-        <div class="actions">
+        <div class="actions" style="margin-top: 16px; display:flex; gap:8px;">
             <button id="triggerSync" class="btn btn-primary">Trigger Daily Sync</button>
-            <button id="refreshStatus" class="btn btn-secondary">Refresh Status</button>
-            <button id="writeSnapshot" class="btn btn-secondary">Write Snapshot</button>
+            <button id="writeSnapshot" class="btn">Write Snapshot</button>
+            <button id="populateCatalog" class="btn">Populate Catalog</button>
         </div>
 
         <div class="log-container">
@@ -487,14 +490,27 @@
 
             // Show/hide action banner
             const actionBanner = document.getElementById('actionBanner');
-            if (status.should_sync_today && !status.progress.isRunning) {
+            const bannerTriggerSync = document.getElementById('bannerTriggerSync');
+            const bannerPopulate = document.getElementById('bannerPopulate');
+            
+            if (status.next_action === 'populate_catalog'){
                 actionBanner.style.display = 'flex';
                 actionBanner.className = 'action-banner urgent';
-                document.getElementById('bannerMessage').textContent = status.message || 'Daily sync needs to be triggered to get emblem rarity data.';
-            } else if (status.progress.isRunning) {
+                document.getElementById('bannerMessage').textContent = status.message || 'Catalog is empty. Populate the catalog to proceed.';
+                bannerTriggerSync.style.display = 'none';
+                bannerPopulate.style.display = 'inline-block';
+            } else if (status.progress?.isRunning){
                 actionBanner.style.display = 'flex';
                 actionBanner.className = 'action-banner';
                 document.getElementById('bannerMessage').textContent = 'Sync is currently running. Please wait for completion.';
+                bannerTriggerSync.style.display = 'none';
+                bannerPopulate.style.display = 'none';
+            } else if (status.should_sync_today){
+                actionBanner.style.display = 'flex';
+                actionBanner.className = 'action-banner urgent';
+                document.getElementById('bannerMessage').textContent = status.message || 'Daily sync needs to be triggered to get emblem rarity data.';
+                bannerTriggerSync.style.display = 'inline-block';
+                bannerPopulate.style.display = 'none';
             } else {
                 actionBanner.style.display = 'none';
             }
@@ -574,6 +590,19 @@
             }
         }
 
+        async function populateCatalog(force=true){
+            try{
+                setLoading(true);
+                const res = await fetch(`/admin/populate?force=${force?'true':'false'}`, { method: 'POST', headers: { 'x-admin-key': prompt('Enter admin key:') || '' }});
+                const data = await res.json();
+                if (!res.ok) throw new Error(data?.error || 'Failed to start population');
+                showAlert('Catalog population started. Check logs for progress.');
+                // Poll status until catalog is populated
+                startProgressMonitoring();
+            }catch(e){ showAlert(e.message, 'error'); }
+            finally{ setLoading(false); }
+        }
+
         function addLogEntry(message, level = 'info') {
             const log = document.getElementById('activityLog');
             const entry = document.createElement('div');
@@ -603,6 +632,8 @@
             addLogEntry('Status refreshed manually', 'info');
         });
         document.getElementById('bannerTriggerSync').addEventListener('click', triggerDailySync);
+        document.getElementById('populateCatalog').addEventListener('click', ()=>populateCatalog(true));
+        document.getElementById('bannerPopulate').addEventListener('click', ()=>populateCatalog(true));
 
         // Initial load
         updateStatusDisplay();

@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import cron from "node-cron";
 import pino from "pino";
 import { launchBrowser, queueScrape } from "./worker.js";
+import { exec } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -596,12 +597,15 @@ app.get("/api/sync/status", async (req, res) => {
     const hasData = (nonnull || 0) > 0;
     const syncState = status?.sync_status || "pending";
     
-    // Check for corrupted state
+    // Check for corrupted or empty state
     let warningMessage = null;
+    let nextAction = needsSync ? "trigger_sync" : "wait_for_tomorrow";
     if (catalogCount === 0) {
-      warningMessage = "No emblems in catalog. Run: npm run populate-catalog --force";
+      warningMessage = "No emblems in catalog. Run: npm run populate-catalog --force or use Admin → Populate Catalog";
+      nextAction = "populate_catalog";
     } else if (status?.total_emblems === 0 && catalogCount > 0) {
-      warningMessage = `Catalog has ${catalogCount} emblems but sync shows 0. System needs reset.`;
+      warningMessage = `Catalog has ${catalogCount} emblems but sync shows 0. Trigger daily sync.`;
+      nextAction = "trigger_sync";
     }
     
     res.json({
@@ -617,7 +621,7 @@ app.get("/api/sync/status", async (req, res) => {
         without_data: nulls || 0
       },
       progress: syncProgress,
-      next_action: needsSync ? "trigger_sync" : "wait_for_tomorrow",
+      next_action: nextAction,
       message: warningMessage || (needsSync 
         ? "Data needs to be synced today. Use admin panel to trigger sync."
         : "Data is current. Next sync will be tomorrow."),
@@ -654,6 +658,43 @@ app.post("/api/sync/trigger", async (req, res) => {
   } catch (e) {
     log.error({ error: e.message }, "Failed to trigger sync");
     res.status(500).json({ error: "Failed to trigger sync" });
+  }
+});
+
+// Admin endpoint: populate catalog (server-side)
+app.post("/admin/populate", (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ error: "Unauthorized" });
+
+    // Prevent running if already running a sync
+    if (syncProgress.isRunning) {
+      return res.status(409).json({ error: "Sync currently running. Try again later." });
+    }
+
+    const force = String(req.query.force||"true").toLowerCase() !== "false";
+    const cmd = `node populate_catalog.js${force ? " --force" : ""}`;
+    log.info({ cmd }, "Starting catalog population via admin endpoint");
+
+    const child = exec(cmd, { env: process.env, cwd: process.cwd(), windowsHide: true });
+
+    child.stdout.on("data", (d) => log.info({ line: d.toString().trim() }, "populate stdout"));
+    child.stderr.on("data", (d) => log.warn({ line: d.toString().trim() }, "populate stderr"));
+
+    child.on("exit", (code) => {
+      log.info({ code }, "populate process exited");
+      // After successful population, reset sync status to pending to allow sync
+      if (code === 0) {
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          updateSyncStatus.run("", 0, listCatalog.all().length, "pending");
+        } catch {}
+      }
+    });
+
+    return res.status(202).json({ message: "Catalog population started", force });
+  } catch (e) {
+    log.error({ error: e.message }, "Failed to start catalog population");
+    res.status(500).json({ error: "Failed to start catalog population" });
   }
 });
 
