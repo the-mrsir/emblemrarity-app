@@ -471,6 +471,26 @@ async function getEntity(entityType, hash) {
   }
 }
 
+// Cache and return multiple icon variants for an item
+const itemIconCache = new Map();
+async function getItemIconVariants(itemHash) {
+  if (itemIconCache.has(itemHash)) return itemIconCache.get(itemHash);
+  try {
+    const it = await getEntity("DestinyInventoryItemDefinition", itemHash);
+    const makeUrl = (p) => (p ? `https://www.bungie.net${p}` : null);
+    const out = {
+      small: makeUrl(it?.displayProperties?.icon),
+      banner: makeUrl(it?.secondaryIcon),
+      overlay: makeUrl(it?.secondaryOverlay),
+      special: makeUrl(it?.secondarySpecial)
+    };
+    itemIconCache.set(itemHash, out);
+    return out;
+  } catch {
+    return { small: null, banner: null, overlay: null, special: null };
+  }
+}
+
 // Get user's owned emblem hashes
 async function getOwnedEmblemHashes(profile) {
   const owned = new Set();
@@ -545,21 +565,27 @@ app.get("/api/emblems", async (req, res) => {
       return res.json({ emblems: [] });
     }
     
-    // Build response from database
+    // Build response from database and enrich with icon variants
     const emblems = [];
+    const iconMap = {};
+    await Promise.all(emblemHashes.map(async (hash) => {
+      iconMap[hash] = await getItemIconVariants(hash);
+    }));
     for (const hash of emblemHashes) {
       const emblem = getEmblem.get(hash);
-      if (emblem) {
-        emblems.push({
-          itemHash: hash,
-          name: emblem.name || `Emblem ${hash}`,
-          image: emblem.icon ? `https://www.bungie.net${emblem.icon}` : null,
-          rarityPercent: emblem.percent,
-          rarityLabel: emblem.label,
-          rarityUpdatedAt: emblem.updatedAt,
-          sourceUrl: emblem.source
-        });
-      }
+      if (!emblem) continue;
+      const icons = iconMap[hash] || {};
+      emblems.push({
+        itemHash: hash,
+        name: emblem.name || `Emblem ${hash}`,
+        image: emblem.icon ? `https://www.bungie.net${emblem.icon}` : (icons.banner || icons.small),
+        icons,
+        rarityPercent: emblem.percent,
+        rarityLabel: emblem.label,
+        rarityUpdatedAt: emblem.updatedAt,
+        sourceUrl: emblem.source || `https://www.light.gg/db/items/${hash}/`,
+        lightUrl: `https://www.light.gg/db/items/${hash}/`
+      });
     }
     
     // Sort by rarity (lowest percentage first)

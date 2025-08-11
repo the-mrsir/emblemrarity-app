@@ -4,120 +4,49 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Destiny 2 Emblem Rarity Tracker</title>
-  <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-            background: #f5f5f5;
+    <style>
+        :root{
+          --bg:#0b0f14;--bg2:#0e131a;--panel:#121824;--line:#1f2937;--text:#e5edf7;--muted:#94a3b8;--accent:#c5a76a;--accent2:#4cc3ff;
         }
-        .container {
-            background: white;
-            border-radius: 8px;
-            padding: 24px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .header h1 {
-            color: #333;
-            margin: 0;
-        }
-        .info-box {
-            background: #e7f3ff;
-            border: 1px solid #b3d9ff;
-            border-radius: 6px;
-            padding: 16px;
-            margin-bottom: 20px;
-            color: #004085;
-        }
-        .info-box h4 {
-            margin: 0 0 8px 0;
-            color: #004085;
-        }
-        .info-box p {
-            margin: 0;
-            font-size: 14px;
-            line-height: 1.4;
-        }
-        .admin-link {
-            display: inline-block;
-            background: #007bff;
-            color: white;
-            padding: 10px 20px;
-            text-decoration: none;
-            border-radius: 6px;
-            margin-top: 10px;
-            transition: background 0.2s;
-        }
-        .admin-link:hover {
-            background: #0056b3;
-        }
-        .emblems-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
-        }
-        .emblem-card {
-            background: white;
-            border: 1px solid #dee2e6;
-            border-radius: 8px;
-            padding: 16px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .emblem-card h3 {
-            margin: 0 0 10px 0;
-            color: #333;
-            font-size: 16px;
-        }
-        .emblem-card .rarity {
-            font-size: 14px;
-            color: #6c757d;
-        }
-        .emblem-card .rarity.rare {
-            color: #007bff;
-            font-weight: bold;
-        }
-        .emblem-card .rarity.very-rare {
-            color: #6f42c1;
-            font-weight: bold;
-        }
-        .emblem-card .rarity.ultra-rare {
-            color: #dc3545;
-            font-weight: bold;
-        }
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #6c757d;
-        }
-        .error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-            border-radius: 6px;
-            padding: 16px;
-            margin: 20px 0;
-        }
-  </style>
+        *{box-sizing:border-box}
+        body{margin:0;background:radial-gradient(1200px 600px at 20% -20%, rgba(76,195,255,.08), transparent),radial-gradient(1200px 600px at 120% 20%, rgba(197,167,106,.08), transparent),var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Arial,Helvetica,sans-serif}
+        .container{max-width:1200px;margin:0 auto;padding:24px}
+        .header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:20px}
+        .brand{display:flex;align-items:center;gap:12px}
+        .sig{width:12px;height:12px;border:2px solid var(--accent);transform:rotate(45deg)}
+        h1{font-size:20px;margin:0;letter-spacing:1px}
+        .info-box{background:linear-gradient(145deg, rgba(18,24,36,.9), rgba(12,18,28,.9));border:1px solid var(--line);border-radius:12px;padding:16px;color:var(--muted)}
+        .admin-link{display:inline-block;margin-top:8px;background:transparent;border:1px solid var(--accent);color:var(--text);padding:8px 12px;border-radius:10px;text-decoration:none}
+        .admin-link:hover{background:rgba(197,167,106,.1)}
+        .emblems-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px;margin-top:20px}
+        .emblem-card{background:linear-gradient(145deg, rgba(18,24,36,.85), rgba(12,18,28,.85));border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+        .art{position:relative;background:#0a0f16}
+        .art .banner{width:100%;aspect-ratio:16/6;object-fit:cover;display:block;opacity:.95}
+        .art .overlay{position:absolute;inset:0;background:radial-gradient(500px 200px at 80% 10%, rgba(76,195,255,.12), transparent)}
+        .art .hex{position:absolute;right:8px;top:8px;width:56px;height:56px;opacity:.9}
+        .meta{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-top:1px solid var(--line)}
+        .title{font-size:16px;font-weight:600}
+        .rarity{font-size:12px;color:var(--muted)}
+        .rarity.rare{color:#61b0ff}
+        .rarity.very-rare{color:#a98bff}
+        .rarity.ultra-rare{color:#ff7b8c}
+        .thumbs{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);background:rgba(10,15,22,.35)}
+        .thumbs img{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);background:#0a0f16}
+        .links{display:flex;gap:10px;padding:12px 14px;border-top:1px solid var(--line)}
+        .link{font-size:12px;color:var(--accent2);text-decoration:none}
+        .link:hover{text-decoration:underline}
+        .loading{text-align:center;padding:40px;color:var(--muted)}
+        .error{background:rgba(255,123,140,.1);color:#ffb3bf;border:1px solid rgba(255,123,140,.25);border-radius:10px;padding:16px;margin:20px 0}
+    </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Destiny 2 Emblem Rarity Tracker</h1>
-            <p>Track the rarity of your Destiny 2 emblems</p>
+            <div class="brand"><div class="sig"></div><h1>Emblem Rarity</h1></div>
+            <a href="/login" class="admin-link">Login with Bungie</a>
         </div>
 
-        <div class="info-box">
-            <h4>🚀 New Daily Sync System</h4>
-            <p>This system automatically syncs emblem rarity data once per day. All user requests now get instant responses from the local database. No more real-time scraping needed!</p>
-            <a href="/admin/ui.html" class="admin-link">Go to Admin Panel</a>
-        </div>
+        
 
         <div id="emblemsContainer">
             <div class="loading">Loading your emblems...</div>
@@ -177,24 +106,36 @@
             }
 
             const container = document.getElementById('emblemsContainer');
-            container.innerHTML = `<h2>Your Emblems (${userEmblems.length})</h2>`;
-            
+            container.innerHTML = ``;
             const grid = document.createElement('div');
             grid.className = 'emblems-grid';
             
             userEmblems.forEach(emblem => {
                 const card = document.createElement('div');
                 card.className = 'emblem-card';
-                
+                const icons = emblem.icons || {};
                 const rarityClass = getRarityClass(emblem.rarityPercent);
                 const rarityText = emblem.rarityPercent 
-                    ? `${emblem.rarityPercent.toFixed(2)}% - ${emblem.rarityLabel || 'light.gg Community'}`
-                    : 'Rarity data not available';
-                
+                    ? `${emblem.rarityPercent.toFixed(2)}% • ${emblem.rarityLabel || 'light.gg Community'}`
+                    : '—';
                 card.innerHTML = `
-                    <h3>${emblem.name || `Emblem ${emblem.itemHash}`}</h3>
+                  <div class="art">
+                    ${icons.banner ? `<img class="banner" src="${icons.banner}" alt="banner">` : ''}
+                    <div class="overlay"></div>
+                    ${icons.special ? `<img class="hex" src="${icons.special}" alt="hex">` : ''}
+                  </div>
+                  <div class="meta">
+                    <div class="title">${emblem.name || `Emblem ${emblem.itemHash}`}</div>
                     <div class="rarity ${rarityClass}">${rarityText}</div>
-                    ${emblem.image ? `<img src="${emblem.image}" alt="Emblem" style="max-width: 100%; height: auto; margin-top: 10px;">` : ''}
+                  </div>
+                  <div class="thumbs">
+                    ${icons.small ? `<img src="${icons.small}" alt="small">` : ''}
+                    ${icons.banner ? `<img src="${icons.banner}" alt="banner">` : ''}
+                    ${icons.overlay ? `<img src="${icons.overlay}" alt="overlay">` : ''}
+                  </div>
+                  <div class="links">
+                    <a class="link" href="https://www.light.gg/db/items/${emblem.itemHash}/" target="_blank" rel="noopener">View on light.gg</a>
+                  </div>
                 `;
                 
                 grid.appendChild(card);
