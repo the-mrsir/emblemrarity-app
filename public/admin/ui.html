@@ -1,33 +1,354 @@
-<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Emblem Rarity — Admin</title>
-<style>body{font-family:system-ui,Segoe UI,Arial;padding:24px;max-width:760px;margin:0 auto}input,button{padding:8px 10px;border:1px solid #ccc;border-radius:8px}button{cursor:pointer}pre{background:#f6f8fa;padding:12px;border-radius:8px;overflow:auto}</style>
-</head><body>
-<h2>Admin</h2>
-<p>Enter your key and run a refresh. Nothing user-specific is stored.</p>
-<p><input id="key" placeholder="admin key" style="width:240px"> <button id="ping">Ping</button> <button id="refresh">Refresh (all)</button> <button id="refresh200">Refresh 200</button> <button id="snapshot">Write snapshot</button></p>
-<pre id="out"></pre>
-<script>
-const o = document.getElementById('out');
-document.getElementById('ping').onclick = async ()=>{
-  const key = document.getElementById('key').value.trim();
-  const r = await fetch(`/admin/ping?key=${encodeURIComponent(key)}`);
-  o.textContent = await r.text();
-};
-document.getElementById('refresh').onclick = async ()=>{
-  const key = document.getElementById('key').value.trim();
-  const r = await fetch(`/admin/refresh?key=${encodeURIComponent(key)}`);
-  o.textContent = await r.text();
-};
-document.getElementById('refresh200').onclick = async ()=>{
-  const key = document.getElementById('key').value.trim();
-  const r = await fetch(`/admin/refresh?key=${encodeURIComponent(key)}&limit=200`);
-  o.textContent = await r.text();
-};
-document.getElementById('snapshot').onclick = async ()=>{
-  const key = document.getElementById('key').value.trim();
-  const r = await fetch(`/admin/snapshot`, { method: "POST", headers: { "x-admin-key": key } });
-  o.textContent = await r.text();
-};
-</script>
-</body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emblem Rarity Admin - Daily Sync</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #333;
+            margin: 0;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .status-card {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 20px;
+            text-align: center;
+        }
+        .status-card h3 {
+            margin: 0 0 10px 0;
+            color: #495057;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .status-card .value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #212529;
+        }
+        .status-card .subtitle {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        .sync-status {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .sync-status.pending { background: #fff3cd; color: #856404; }
+        .sync-status.in_progress { background: #cce5ff; color: #004085; }
+        .sync-status.completed { background: #d4edda; color: #155724; }
+        .sync-status.failed { background: #f8d7da; color: #721c24; }
+        .actions {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #007bff;
+            color: white;
+        }
+        .btn-primary:hover { background: #0056b3; }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover { background: #545b62; }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-danger:hover { background: #c82333; }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .log-container {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .log-container h3 {
+            margin: 0 0 15px 0;
+            color: #495057;
+        }
+        .log-entry {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 12px;
+            margin-bottom: 8px;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        .log-entry .timestamp {
+            color: #6c757d;
+            margin-right: 10px;
+        }
+        .log-entry .level {
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .log-entry .level.info { color: #007bff; }
+        .log-entry .level.warn { color: #ffc107; }
+        .log-entry .level.error { color: #dc3545; }
+        .refresh-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: none;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            color: #6c757d;
+        }
+        .refresh-btn:hover { color: #495057; }
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+        .alert {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .alert-info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Emblem Rarity Daily Sync Admin</h1>
+            <p>Monitor and control the daily emblem rarity synchronization system</p>
+        </div>
+
+        <div id="alert" class="alert"></div>
+
+        <div class="status-grid">
+            <div class="status-card">
+                <h3>Last Sync Date</h3>
+                <div class="value" id="lastSyncDate">-</div>
+                <div class="subtitle">When data was last refreshed</div>
+            </div>
+            <div class="status-card">
+                <h3>Sync Status</h3>
+                <div class="value">
+                    <span id="syncStatus" class="sync-status pending">Pending</span>
+                </div>
+                <div class="subtitle">Current sync operation status</div>
+            </div>
+            <div class="status-card">
+                <h3>Total Emblems</h3>
+                <div class="value" id="totalEmblems">-</div>
+                <div class="subtitle">Emblems with rarity data</div>
+            </div>
+            <div class="status-card">
+                <h3>Should Sync Today</h3>
+                <div class="value" id="shouldSyncToday">-</div>
+                <div class="subtitle">Whether sync is needed today</div>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button id="triggerSync" class="btn btn-primary">Trigger Daily Sync</button>
+            <button id="refreshStatus" class="btn btn-secondary">Refresh Status</button>
+            <button id="writeSnapshot" class="btn btn-secondary">Write Snapshot</button>
+        </div>
+
+        <div class="log-container">
+            <h3>Recent Activity Log</h3>
+            <div id="activityLog">
+                <div class="log-entry">
+                    <span class="timestamp">Loading...</span>
+                    <span class="level info">Loading activity log...</span>
+                </div>
+            </div>
+        </div>
+
+        <button id="refreshBtn" class="refresh-btn" title="Refresh all data">🔄</button>
+    </div>
+
+    <script>
+        let isRefreshing = false;
+
+        function showAlert(message, type = 'info') {
+            const alert = document.getElementById('alert');
+            alert.textContent = message;
+            alert.className = `alert alert-${type}`;
+            alert.style.display = 'block';
+            setTimeout(() => {
+                alert.style.display = 'none';
+            }, 5000);
+        }
+
+        function setLoading(loading) {
+            isRefreshing = loading;
+            document.body.classList.toggle('loading', loading);
+            document.getElementById('triggerSync').disabled = loading;
+            document.getElementById('refreshStatus').disabled = loading;
+            document.getElementById('writeSnapshot').disabled = loading;
+        }
+
+        async function fetchSyncStatus() {
+            try {
+                const response = await fetch('/api/sync/status');
+                if (!response.ok) throw new Error('Failed to fetch sync status');
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching sync status:', error);
+                showAlert('Failed to fetch sync status', 'error');
+                return null;
+            }
+        }
+
+        async function updateStatusDisplay() {
+            const status = await fetchSyncStatus();
+            if (!status) return;
+
+            // Update status cards
+            document.getElementById('lastSyncDate').textContent = 
+                status.last_sync_date || 'Never';
+            
+            const syncStatusEl = document.getElementById('syncStatus');
+            syncStatusEl.textContent = status.sync_status || 'pending';
+            syncStatusEl.className = `sync-status ${status.sync_status || 'pending'}`;
+            
+            document.getElementById('totalEmblems').textContent = 
+                status.total_emblems || 0;
+            
+            document.getElementById('shouldSyncToday').textContent = 
+                status.should_sync_today ? 'Yes' : 'No';
+        }
+
+        async function triggerDailySync() {
+            if (isRefreshing) return;
+            
+            setLoading(true);
+            try {
+                const response = await fetch('/api/sync/trigger', { method: 'POST' });
+                const result = await response.json();
+                
+                if (response.ok) {
+                    showAlert(result.message, 'success');
+                    // Wait a bit then refresh status
+                    setTimeout(updateStatusDisplay, 2000);
+                } else {
+                    showAlert(result.error || 'Failed to trigger sync', 'error');
+                }
+            } catch (error) {
+                console.error('Error triggering sync:', error);
+                showAlert('Failed to trigger sync', 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        async function writeSnapshot() {
+            if (isRefreshing) return;
+            
+            setLoading(true);
+            try {
+                const response = await fetch('/admin/snapshot', { 
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-admin-key': prompt('Enter admin key:') || ''
+                    }
+                });
+                const result = await response.json();
+                
+                if (response.ok) {
+                    showAlert('Snapshot written successfully', 'success');
+                } else {
+                    showAlert(result.error || 'Failed to write snapshot', 'error');
+                }
+            } catch (error) {
+                console.error('Error writing snapshot:', error);
+                showAlert('Failed to write snapshot', 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function addLogEntry(message, level = 'info') {
+            const log = document.getElementById('activityLog');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `
+                <span class="timestamp">${timestamp}</span>
+                <span class="level ${level}">${level.toUpperCase()}</span>
+                <span>${message}</span>
+            `;
+            
+            log.insertBefore(entry, log.firstChild);
+            
+            // Keep only last 20 entries
+            while (log.children.length > 20) {
+                log.removeChild(log.lastChild);
+            }
+        }
+
+        // Event listeners
+        document.getElementById('triggerSync').addEventListener('click', triggerDailySync);
+        document.getElementById('refreshStatus').addEventListener('click', updateStatusDisplay);
+        document.getElementById('writeSnapshot').addEventListener('click', writeSnapshot);
+        document.getElementById('refreshBtn').addEventListener('click', () => {
+            updateStatusDisplay();
+            addLogEntry('Status refreshed manually', 'info');
+        });
+
+        // Initial load
+        updateStatusDisplay();
+        addLogEntry('Admin interface loaded', 'info');
+
+        // Auto-refresh every 30 seconds
+        setInterval(updateStatusDisplay, 30000);
+    </script>
+</body>
+</html>

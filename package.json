@@ -1,9 +1,10 @@
 {
   "name": "emblemrarity-app",
-  "version": "9.2.4",
+  "version": "10.0.0",
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "populate-catalog": "node populate_catalog.js",
     "postinstall": "npx playwright install --with-deps chromium"
   },
   "dependencies": {

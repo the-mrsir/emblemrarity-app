@@ -22,7 +22,7 @@ const {
   ADMIN_KEY,
   ALLOW_QUERY_ADMIN = "true",
   CRON_ENABLED = "true",
-  REFRESH_CRON = "0 3 * * *",
+  REFRESH_CRON = "0 3 * * *", // 3 AM daily
   CRON_TZ = "America/New_York",
   LIGHTGG_TTL = "2592000",
   LIGHTGG_NULL_TTL = "1800",
@@ -95,7 +95,18 @@ CREATE TABLE IF NOT EXISTS rarity_cache (
   source TEXT,
   updatedAt INTEGER
 );
+CREATE TABLE IF NOT EXISTS daily_sync_status (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  last_sync_date TEXT,
+  last_sync_timestamp INTEGER,
+  total_emblems INTEGER,
+  sync_status TEXT
+);
 `);
+
+// Initialize daily sync status if empty
+db.exec(`INSERT OR IGNORE INTO daily_sync_status (id, last_sync_date, last_sync_timestamp, total_emblems, sync_status) VALUES (1, '', 0, 0, 'pending')`);
+
 const setCollectible = db.prepare("INSERT INTO collectible_item (collectibleHash,itemHash) VALUES (?,?) ON CONFLICT(collectibleHash) DO UPDATE SET itemHash=excluded.itemHash");
 const getCollectible = db.prepare("SELECT itemHash FROM collectible_item WHERE collectibleHash=?");
 const upsertCatalog = db.prepare("INSERT INTO emblem_catalog (itemHash,name,icon) VALUES (?,?,?) ON CONFLICT(itemHash) DO UPDATE SET name=COALESCE(excluded.name,name), icon=COALESCE(excluded.icon,icon)");
@@ -104,6 +115,100 @@ const listCatalog = db.prepare("SELECT itemHash FROM emblem_catalog");
 const getRarity = db.prepare("SELECT percent,label,source,updatedAt FROM rarity_cache WHERE itemHash=?");
 const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,source,updatedAt) VALUES (?,?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET percent=excluded.percent,label=excluded.label,source=excluded.source,updatedAt=excluded.updatedAt");
 const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE 0 END) as nulls, SUM(CASE WHEN percent IS NOT NULL THEN 1 ELSE 0 END) as nonnull FROM rarity_cache");
+const getSyncStatus = db.prepare("SELECT last_sync_date, last_sync_timestamp, total_emblems, sync_status FROM daily_sync_status WHERE id = 1");
+const updateSyncStatus = db.prepare("UPDATE daily_sync_status SET last_sync_date = ?, last_sync_timestamp = ?, total_emblems = ?, sync_status = ? WHERE id = 1");
+
+// ---------------- Daily Sync System ----------------
+function isToday(dateString) {
+  const today = new Date().toISOString().split('T')[0];
+  return dateString === today;
+}
+
+async function shouldSyncToday() {
+  const status = getSyncStatus.get();
+  if (!status || !status.last_sync_date) return true;
+  return !isToday(status.last_sync_date);
+}
+
+async function performDailySync() {
+  const today = new Date().toISOString().split('T')[0];
+  const now = Math.floor(Date.now() / 1000);
+  
+  try {
+    log.info("Starting daily emblem rarity sync...");
+    updateSyncStatus.run(today, now, 0, "in_progress");
+    
+    // Get all emblem hashes from catalog
+    const catalogRows = listCatalog.all();
+    const emblemHashes = catalogRows.map(r => r.itemHash);
+    
+    if (emblemHashes.length === 0) {
+      log.warn("No emblems found in catalog, skipping sync");
+      updateSyncStatus.run(today, now, 0, "completed");
+      return;
+    }
+    
+    log.info({ total: emblemHashes.length }, "Syncing emblem rarities");
+    
+    // Launch browser for scraping
+    await launchBrowser();
+    
+    // Process emblems in batches to avoid overwhelming the system
+    const batchSize = 50;
+    let processed = 0;
+    let successCount = 0;
+    
+    for (let i = 0; i < emblemHashes.length; i += batchSize) {
+      const batch = emblemHashes.slice(i, i + batchSize);
+      log.info({ batch: Math.floor(i / batchSize) + 1, total: Math.ceil(emblemHashes.length / batchSize), size: batch.length }, "Processing batch");
+      
+      // Process batch with concurrency control
+      const promises = batch.map(itemHash => 
+        new Promise(async (resolve) => {
+          try {
+            const result = await scrapeEmblemRarity(itemHash);
+            if (result.percent !== null) {
+              setRarity.run(itemHash, result.percent, result.label, result.source, now);
+              successCount++;
+            }
+            processed++;
+          } catch (error) {
+            log.error({ itemHash, error: error.message }, "Failed to scrape emblem");
+            processed++;
+          }
+          resolve();
+        })
+      );
+      
+      await Promise.all(promises);
+      
+      // Small delay between batches
+      if (i + batchSize < emblemHashes.length) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    // Update sync status
+    updateSyncStatus.run(today, now, successCount, "completed");
+    
+    // Write snapshot
+    writeSnapshotSafe();
+    
+    log.info({ total: emblemHashes.length, success: successCount, processed }, "Daily sync completed");
+    
+  } catch (error) {
+    log.error({ error: error.message }, "Daily sync failed");
+    updateSyncStatus.run(today, now, 0, "failed");
+  }
+}
+
+async function scrapeEmblemRarity(itemHash) {
+  return new Promise((resolve) => {
+    queueScrape(itemHash, (result) => {
+      resolve(result);
+    });
+  });
+}
 
 // ---------------- OAuth (memory tokens) ----------------
 const tokens = new Map();
@@ -259,27 +364,19 @@ async function getOwnedEmblemItemHashes(profile){
   return [...new Set(emblemHashes)];
 }
 
-// ---------------- Rarity (cache-first + worker queue) ----------------
-const POS_TTL = Number(LIGHTGG_TTL||"2592000");
-const NULL_TTL = Number(LIGHTGG_NULL_TTL||"1800");
-
+// ---------------- Rarity (database-first) ----------------
 async function getRarityCached(itemHash){
   const row = getRarity.get(itemHash);
-  const now = Math.floor(Date.now()/1000);
-  if (row){
-    const age = now - (row.updatedAt || 0);
-    const stale = (row.percent == null && age >= NULL_TTL) || (row.percent != null && age >= POS_TTL);
-    if (stale) queueScrape(itemHash, async (r) => {
-      setRarity.run(itemHash, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
-      writeSnapshotSafe();
-    });
+  if (row && row.percent !== null) {
     return { percent: row.percent, label: row.label, source: row.source, updatedAt: row.updatedAt };
   }
-  // first time
-  queueScrape(itemHash, async (r) => {
-    setRarity.run(itemHash, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
-    writeSnapshotSafe();
-  });
+  
+  // If no rarity data, check if we should sync today
+  if (await shouldSyncToday()) {
+    log.info("No rarity data found and daily sync needed, triggering sync");
+    performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
+  }
+  
   return { percent: null, label: "light.gg", source: `https://www.light.gg/db/items/${itemHash}/`, updatedAt: null };
 }
 
@@ -296,54 +393,36 @@ function writeSnapshotSafe(){
   }, 500);
 }
 
-// nightly refresh
-async function refreshAllRarities(limit=null){
-  const rows = listCatalog.all();
-  const hashes = rows.map(r => r.itemHash);
-  const target = limit ? hashes.slice(0, limit) : hashes;
-  log.info({ total: target.length }, "refresh start");
-  await Promise.all(target.map(h => new Promise((resolve) => {
-    queueScrape(h, (r) => {
-      setRarity.run(h, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
-      resolve();
-    });
-  })));
-  writeSnapshotSafe();
-  log.info({ total: target.length }, "refresh done");
-}
-
-if (CRON_ENABLED === "true" && REFRESH_CRON){
-  cron.schedule(REFRESH_CRON, () => {
-    refreshAllRarities().catch(e => log.error({ err:e?.message }, "cron refresh failed"));
-  }, { timezone: CRON_TZ });
-  log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "cron scheduled");
-}
-
-// public refresh lock
-let publicRefreshBusy = false;
-let publicRefreshLast = 0;
-
-// ---- Public refresh endpoints (no auth; temporary) ----
-app.get("/refresh-now", async (req,res) => {
-  if (publicRefreshBusy) return res.status(429).json({ error: "busy" });
-  publicRefreshBusy = true; publicRefreshLast = Date.now();
+// ---------------- Daily Sync Endpoints ----------------
+app.get("/api/sync/status", (req, res) => {
   try {
-    await launchBrowser();
-    const limit = req.query?.limit ? Number(req.query.limit) : null;
-    await refreshAllRarities(limit);
-    const { nulls, nonnull } = countRarity.get() || {};
-    res.json({ ok:true, rarity:{ nulls, nonnull }, last: publicRefreshLast });
-  } catch(e) {
-    log.error({ err:e?.message }, "refresh-now error");
-    res.status(500).json({ error:"refresh error" });
-  } finally {
-    publicRefreshBusy = false;
+    const status = getSyncStatus.get();
+    res.json({
+      last_sync_date: status?.last_sync_date || null,
+      last_sync_timestamp: status?.last_sync_timestamp || 0,
+      total_emblems: status?.total_emblems || 0,
+      sync_status: status?.sync_status || "pending",
+      should_sync_today: status ? !isToday(status.last_sync_date) : true
+    });
+  } catch (e) {
+    log.error({ error: e.message }, "Failed to get sync status");
+    res.status(500).json({ error: "Failed to get sync status" });
   }
 });
 
-app.get("/snapshot-now", (req,res)=>{
-  try{ writeSnapshotSafe(); res.json({ ok:true }); }
-  catch(e){ res.status(500).json({ error:"snapshot error" }); }
+app.post("/api/sync/trigger", async (req, res) => {
+  try {
+    if (await shouldSyncToday()) {
+      // Start sync in background
+      performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
+      res.json({ message: "Daily sync started", status: "started" });
+    } else {
+      res.json({ message: "Already synced today", status: "already_synced" });
+    }
+  } catch (e) {
+    log.error({ error: e.message }, "Failed to trigger sync");
+    res.status(500).json({ error: "Failed to trigger sync" });
+  }
 });
 
 // ---------------- API ----------------
@@ -356,7 +435,7 @@ app.get("/api/emblems", async (req, res) => {
     const hashes = await getOwnedEmblemItemHashes(profile);
     if (!hashes.length) return res.json({ emblems: [] });
 
-    // Build rows
+    // Build rows from database
     const rows = [];
     const missing = [];
     for (const h of hashes){
@@ -374,6 +453,7 @@ app.get("/api/emblems", async (req, res) => {
         sourceUrl: rc?.source ?? null
       });
     }
+    
     // resolve some missing name/icons now
     for (const h of missing.slice(0,48)){
       try {
@@ -394,8 +474,12 @@ app.get("/api/emblems", async (req, res) => {
 
     // sort by rarity
     rows.sort((a,b)=> (a.rarityPercent ?? 9e9) - (b.rarityPercent ?? 9e9));
-    // gentle prewarm for top 24
-    rows.slice(0,24).forEach(r => getRarityCached(r.itemHash));
+    
+    // Check if we need to trigger daily sync
+    if (await shouldSyncToday()) {
+      log.info("Triggering daily sync for missing rarity data");
+      performDailySync().catch(e => log.error({ error: e.message }, "Background sync failed"));
+    }
 
     res.json({ emblems: rows });
   }catch(e){ log.error({ err:e?.message }, "/api/emblems failed"); res.status(500).json({ error: "Server error" }); }
@@ -411,25 +495,27 @@ app.get("/api/rarity", async (req, res) => {
   }catch(e){ log.error({ err:e?.message }, "/api/rarity failed"); res.status(500).json({ error:"rarity error" }); }
 });
 
-// Admin endpoints (still available if configured)
+// Admin endpoints
 app.get("/admin/help", (req,res) => {
   const k = normKey(ADMIN_KEY);
   const allow = String(ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
   res.json({ adminConfigured: Boolean(k), allowQuery: allow, keyLength: k.length });
 });
+
 app.get("/admin/ping", (req,res) => {
   if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
   res.json({ ok:true, admin:true });
 });
-app.get("/admin/refresh", async (req,res) => {
+
+app.post("/admin/sync", async (req,res) => {
   try{
     if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
-    const limit = req.query?.limit ? Number(req.query.limit) : null;
-    await refreshAllRarities(limit);
+    await performDailySync();
     const { nulls, nonnull } = countRarity.get() || {};
     res.json({ ok:true, rarity: { nulls, nonnull } });
-  }catch(e){ log.error({ err:e?.message }, "admin refresh failed"); res.status(500).json({ error:"admin error" }); }
+  }catch(e){ log.error({ err:e?.message }, "admin sync failed"); res.status(500).json({ error:"admin error" }); }
 });
+
 app.post("/admin/snapshot", (req,res) => {
   try{
     if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
@@ -440,6 +526,30 @@ app.post("/admin/snapshot", (req,res) => {
 
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
+// ---------------- Startup and Cron ----------------
+// Check if we need to sync on startup
+async function checkStartupSync() {
+  try {
+    if (await shouldSyncToday()) {
+      log.info("Startup sync needed, triggering daily sync");
+      performDailySync().catch(e => log.error({ error: e.message }, "Startup sync failed"));
+    } else {
+      log.info("No startup sync needed, data is current");
+    }
+  } catch (e) {
+    log.error({ error: e.message }, "Startup sync check failed");
+  }
+}
+
+// Schedule daily sync
+if (CRON_ENABLED === "true" && REFRESH_CRON){
+  cron.schedule(REFRESH_CRON, () => {
+    log.info("Cron triggered daily sync");
+    performDailySync().catch(e => log.error({ err:e?.message }, "cron sync failed"));
+  }, { timezone: CRON_TZ });
+  log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "cron scheduled");
+}
+
 process.on("SIGTERM", async () => {
   try { await (await launchBrowser()).close(); } catch {}
   process.exit(0);
@@ -448,4 +558,7 @@ process.on("SIGTERM", async () => {
 app.listen(PORT, async () => {
   await launchBrowser();
   log.info(`Listening on ${PORT}`);
+  
+  // Check if we need to sync on startup
+  setTimeout(checkStartupSync, 5000); // Wait 5 seconds after startup
 });
