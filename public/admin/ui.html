@@ -512,10 +512,13 @@
                 document.getElementById('bannerMessage').textContent = 'Sync is currently running. Please wait for completion.';
                 bannerTriggerSync.style.display = 'none';
                 bannerPopulate.style.display = 'none';
-            } else if (status.should_sync_today) {
+            } else if (status.should_sync_today || (status.rarity_stats && status.catalog_emblems && status.rarity_stats.with_data < status.catalog_emblems)) {
                 actionBanner.style.display = 'flex';
                 actionBanner.className = 'action-banner urgent';
-                document.getElementById('bannerMessage').textContent = 'Daily sync needs to be triggered to get emblem rarity data.';
+                const missing = (status.catalog_emblems || 0) - (status.rarity_stats?.with_data || 0);
+                document.getElementById('bannerMessage').textContent = missing > 0
+                  ? `${missing} emblems missing rarity. Trigger sync.`
+                  : 'Daily sync needs to be triggered to get emblem rarity data.';
                 bannerTriggerSync.style.display = 'inline-block';
                 bannerPopulate.style.display = 'none';
             } else {

@@ -129,10 +129,20 @@ function updateProgress(update) {
 // Check if we need to sync today
 function shouldSyncToday() {
   const status = getSyncStatus.get();
-  if (!status || !status.last_sync_date) return true;
-  
   const today = new Date().toISOString().split('T')[0];
-  return status.last_sync_date !== today;
+  // If never synced, or last sync was not today → need sync
+  if (!status || !status.last_sync_date || status.last_sync_date !== today) return true;
+
+  // If counts are incomplete, sync should still run
+  try {
+    const totalEmblems = listEmblems.all().length;
+    const { count } = countEmblems.get() || {};
+    const withData = count || 0;
+    if (totalEmblems > 0 && withData < totalEmblems) {
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 // Perform daily sync
@@ -657,6 +667,8 @@ app.get("/api/sync/status", (req, res) => {
     const { count } = countEmblems.get() || {};
     const totalEmblems = listEmblems.all().length;
     const needsSync = shouldSyncToday();
+    const withData = count || 0;
+    const missing = Math.max(0, totalEmblems - withData);
     
     res.json({
       last_sync_date: status?.last_sync_date || null,
@@ -666,14 +678,16 @@ app.get("/api/sync/status", (req, res) => {
       sync_status: status?.sync_status || "pending",
       should_sync_today: needsSync,
       rarity_stats: {
-        with_data: count || 0,
-        without_data: totalEmblems - (count || 0)
+        with_data: withData,
+        without_data: missing
       },
       progress: syncProgress,
-      next_action: totalEmblems === 0 ? "populate_catalog" : (needsSync ? "trigger_sync" : "wait_for_tomorrow"),
+      next_action: totalEmblems === 0
+        ? "populate_catalog"
+        : (missing > 0 ? "trigger_sync" : (needsSync ? "trigger_sync" : "wait_for_tomorrow")),
       message: totalEmblems === 0 
         ? "No emblems in catalog. Populate catalog first."
-        : (needsSync ? "Data needs to be synced today." : "Data is current.")
+        : (missing > 0 ? `${missing} emblems missing rarity. Start sync.` : (needsSync ? "Data needs to be synced today." : "Data is current."))
     });
   } catch (error) {
     log.error({ error: error.message }, "Failed to get sync status");
