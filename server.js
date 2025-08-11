@@ -19,9 +19,12 @@ const {
   CRON_ENABLED = "true",
   REFRESH_CRON = "0 3 * * *",            // 3:00 AM
   CRON_TZ = "America/New_York",
-  LIGHTGG_NULL_TTL = "3600",
-  LIGHTGG_TTL = "1209600",
-  LIGHTGG_RETRY_MS = "4000"
+  LIGHTGG_NULL_TTL = "1800",             // 30m for nulls
+  LIGHTGG_TTL = "2592000",               // 30d for positives
+  LIGHTGG_RETRY_MS = "4000",
+  ADMIN_KEY,
+  RARITY_CONCURRENCY = "2",
+  RARITY_MIN_GAP_MS = "200"
 } = process.env;
 
 if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) {
@@ -46,6 +49,7 @@ function logErr(tag, e) {
   if (data) console.error(`[${tag}] body=`, JSON.stringify(data).slice(0, 400));
 }
 function logInfo(msg) { console.log(`[info] ${msg}`); }
+function nowSec(){ return Math.floor(Date.now()/1000); }
 
 // ---------------- DB schema (no user data) ----------------
 const db = new Database(path.join(process.cwd(), "cache.db"));
@@ -73,7 +77,6 @@ CREATE TABLE IF NOT EXISTS rarity_cache (
   source TEXT,
   updatedAt INTEGER
 );
--- ensure no per-user table exists
 DROP TABLE IF EXISTS user_owned;
 `);
 
@@ -86,6 +89,7 @@ const getCatalog = db.prepare("SELECT name,icon FROM emblem_catalog WHERE itemHa
 const listCatalog = db.prepare("SELECT itemHash FROM emblem_catalog");
 const getRarity = db.prepare("SELECT percent,label,source,updatedAt FROM rarity_cache WHERE itemHash=?");
 const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,source,updatedAt) VALUES (?,?,?,?,?) ON CONFLICT(itemHash) DO UPDATE SET percent=excluded.percent,label=excluded.label,source=excluded.source,updatedAt=excluded.updatedAt");
+const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE 0 END) as nulls, SUM(CASE WHEN percent IS NOT NULL THEN 1 ELSE 0 END) as nonnull FROM rarity_cache");
 
 // ---------------- OAuth tokens (memory only) ----------------
 const tokens = new Map(); // sid -> {access_token, refresh_token, expires_at}
@@ -136,7 +140,7 @@ app.get("/oauth/callback", async (req, res) => {
 async function authedHeaders(sid) {
   let t = tokens.get(sid);
   if (!t) throw new Error("Not linked");
-  const now = Math.floor(Date.now()/1000);
+  const now = nowSec();
   if (t.expires_at - 15 < now) {
     try {
       const r = await axios.post(
@@ -280,7 +284,11 @@ async function getOwnedEmblemItemHashes(profile) {
 
 // --------------- Playwright rarity ---------------
 let browser;
-const rarityInflight = new Map();
+let lastScrapeAt = 0;
+let activeScrapes = 0;
+const scrapeQueue = [];
+const MAX_CONC = Number(RARITY_CONCURRENCY);
+const MIN_GAP = Number(RARITY_MIN_GAP_MS);
 
 async function ensureBrowser() {
   if (!browser) {
@@ -294,7 +302,7 @@ function extractPctFromText(text) {
   return null;
 }
 
-async function fetchRarityNetwork(itemHash) {
+async function doScrape(itemHash) {
   await ensureBrowser();
   const ctx = await browser.newContext({
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
@@ -321,34 +329,84 @@ async function fetchRarityNetwork(itemHash) {
   return res;
 }
 
-async function fetchRarityOnce(itemHash) {
-  const row = getRarity.get(itemHash);
-  const now = Math.floor(Date.now()/1000);
-  const NULL_TTL = Number(LIGHTGG_NULL_TTL), POS_TTL = Number(LIGHTGG_TTL);
-  if (row) {
-    const age = now - (row.updatedAt || 0);
-    if (row.percent != null && age < POS_TTL) return { percent: row.percent, label: row.label, source: row.source };
-    if (row.percent == null && age < NULL_TTL) return { percent: null, label: row.label, source: row.source };
-  }
-  if (rarityInflight.has(itemHash)) return await rarityInflight.get(itemHash);
-  const p = (async () => {
-    const r = await fetchRarityNetwork(itemHash);
-    const updatedAt = Math.floor(Date.now()/1000);
-    setRarity.run(itemHash, r.percent, r.label, r.source, updatedAt);
-    return r;
-  })();
-  rarityInflight.set(itemHash, p);
-  try { return await p; } finally { rarityInflight.delete(itemHash); }
+function scheduleScrape(itemHash) {
+  return new Promise((resolve, reject) => {
+    const task = async () => {
+      const wait = Math.max(0, MIN_GAP - (Date.now() - lastScrapeAt));
+      await new Promise(r => setTimeout(r, wait));
+      lastScrapeAt = Date.now();
+      try { const r = await doScrape(itemHash); resolve(r); }
+      catch (e) { reject(e); }
+    };
+    scrapeQueue.push(task);
+    runQueue();
+  });
+}
+async function runQueue() {
+  if (activeScrapes >= MAX_CONC) return;
+  const task = scrapeQueue.shift();
+  if (!task) return;
+  activeScrapes++;
+  try { await task(); }
+  finally { activeScrapes--; runQueue(); }
 }
 
-// Force refresh that ignores TTL and always writes latest
+const rarityInflight = new Map();
+
+async function fetchRarityNetwork(itemHash) {
+  // throttle via queue
+  return scheduleScrape(itemHash);
+}
+
 async function refreshRarityForce(itemHash) {
   const r = await fetchRarityNetwork(itemHash);
-  setRarity.run(itemHash, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
+  setRarity.run(itemHash, r.percent, r.label, r.source, nowSec());
   return r;
 }
 
-// --------------- Nightly bulk refresh (no user data involved) ---------------
+function shouldRefresh(row, now=nowSec()) {
+  const NULL_TTL = Number(LIGHTGG_NULL_TTL);
+  const POS_TTL  = Number(LIGHTGG_TTL);
+  const age = now - (row.updatedAt || 0);
+  return (row.percent == null && age >= NULL_TTL) || (row.percent != null && age >= POS_TTL);
+}
+
+/** Cache-first rarity:
+ * - If cached, return instantly and queue a background refresh if stale.
+ * - If not cached, scrape once and store.
+ */
+async function getRarityCached(hash) {
+  const row = getRarity.get(hash);
+  if (row) {
+    if (shouldRefresh(row)) queueRefresh(hash);
+    return { percent: row.percent, label: row.label, source: row.source, updatedAt: row.updatedAt };
+  }
+  const r = await refreshRarityForce(hash);
+  return { ...r, updatedAt: nowSec() };
+}
+
+// Background refresh queue (no stampede)
+const refreshQueue = new Set();
+async function queueRefresh(hash) {
+  if (refreshQueue.has(hash)) return;
+  refreshQueue.add(hash);
+  try { await refreshRarityForce(hash); }
+  catch (e) { logErr(`queueRefresh ${hash}`, e); }
+  finally { refreshQueue.delete(hash); }
+}
+
+// --------------- Nightly bulk refresh + snapshot ---------------
+function writeSnapshot() {
+  try {
+    const rows = db.prepare("SELECT itemHash, percent, label, source, updatedAt FROM rarity_cache WHERE percent IS NOT NULL").all();
+    const fp = path.join(__dirname, "public", "rarity-snapshot.json");
+    fs.writeFileSync(fp, JSON.stringify(rows));
+    logInfo(`Wrote rarity-snapshot.json (${rows.length} items)`);
+  } catch (e) {
+    logErr("writeSnapshot", e);
+  }
+}
+
 async function refreshAllRarities(limit = null) {
   const rows = listCatalog.all();
   const hashes = rows.map(r => r.itemHash);
@@ -358,9 +416,8 @@ async function refreshAllRarities(limit = null) {
   for (const h of target) {
     try { const r = await refreshRarityForce(h); if (r.percent != null) ok++; }
     catch (e) { logErr(`refreshRarityForce ${h}`, e); }
-    // small delay to be polite
-    await new Promise(r => setTimeout(r, 150));
   }
+  writeSnapshot();
   logInfo(`Nightly refresh done. Updated ${ok}/${target.length}`);
 }
 
@@ -375,6 +432,31 @@ if (CRON_ENABLED === "true" && REFRESH_CRON) {
   }
 }
 
+// Snapshot route with caching headers
+app.get("/rarity-snapshot.json", (req, res) => {
+  try {
+    const fp = path.join(__dirname, "public", "rarity-snapshot.json");
+    if (!fs.existsSync(fp)) return res.json([]);
+    const data = fs.readFileSync(fp, "utf-8");
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    res.send(data);
+  } catch (e) {
+    logErr("snapshot", e); res.json([]);
+  }
+});
+
+// Admin: force full refresh & snapshot (no user data). Protect with ADMIN_KEY.
+app.post("/admin/refresh", express.json(), async (req, res) => {
+  try {
+    if (!ADMIN_KEY || req.headers["x-admin-key"] !== ADMIN_KEY) return res.status(401).json({ error: "unauthorized" });
+    const limit = req.body?.limit ? Number(req.body.limit) : null;
+    await refreshAllRarities(limit);
+    const { nulls, nonnull } = countRarity.get() || {};
+    res.json({ ok: true, rarity: { nulls, nonnull } });
+  } catch (e) { logErr("admin/refresh", e); res.status(500).json({ error: "admin error" }); }
+});
+
 // ---------------- API ----------------
 app.get("/api/emblems", async (req, res) => {
   try {
@@ -387,7 +469,7 @@ app.get("/api/emblems", async (req, res) => {
     const hashes = await getOwnedEmblemItemHashes(profile);
     if (!hashes.length) return res.json({ emblems: [] });
 
-    // Build rows primarily from catalog; fill missing name/icon for a subset immediately
+    // Build rows primarily from catalog, include rarityUpdatedAt
     const rows = [];
     const missing = [];
     for (const h of hashes) {
@@ -402,10 +484,11 @@ app.get("/api/emblems", async (req, res) => {
         image: icon ? `https://www.bungie.net${icon}` : null,
         rarityPercent: rc?.percent ?? null,
         rarityLabel: rc?.label ?? null,
+        rarityUpdatedAt: rc?.updatedAt ?? null,
         sourceUrl: rc?.source ?? null
       });
     }
-    // Resolve up to 48 missing now for better UX
+    // Resolve some missing now for better UX
     for (const h of missing.slice(0,48)) {
       try {
         const item = await getEntity("DestinyInventoryItemDefinition", h);
@@ -419,7 +502,7 @@ app.get("/api/emblems", async (req, res) => {
         }
       } catch {}
     }
-    // Background fill the rest (no user association stored)
+    // Background fill the rest
     (async () => {
       for (const h of missing.slice(48)) {
         try {
@@ -434,9 +517,7 @@ app.get("/api/emblems", async (req, res) => {
     // Sort by rarity
     rows.sort((a,b)=> (a.rarityPercent ?? 999999) - (b.rarityPercent ?? 999999));
 
-    // Gentle prewarm of rarity for top 24
-    (async () => { for (const r of rows.slice(0,24)) { try { await fetchRarityOnce(r.itemHash); } catch {} } })();
-
+    res.setHeader("Cache-Control", "no-store");
     res.json({ emblems: rows });
   } catch (e) {
     logErr("api/emblems", e);
@@ -444,25 +525,27 @@ app.get("/api/emblems", async (req, res) => {
   }
 });
 
-// rarity API
+// Rarity API: cache-first, background refresh if stale
 app.get("/api/rarity", async (req, res) => {
   try {
     const hash = Number(req.query.hash);
     if (!hash) return res.status(400).json({ error: "hash required" });
-    const r = await fetchRarityOnce(hash);
-    res.json(r);
+    const r = await getRarityCached(hash);
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.json({ percent: r.percent, label: r.label, source: r.source, updatedAt: r.updatedAt });
   } catch (e) {
     logErr("api/rarity", e);
     res.status(500).json({ error: "rarity error" });
   }
 });
 
-// minimal debug (no user IDs are logged or stored)
-app.get("/debug", (req, res) => {
+// Stats (no user info)
+app.get("/stats", (req, res) => {
   try {
-    const total = listCatalog.all().length;
-    res.json({ catalogCount: total, cronEnabled: CRON_ENABLED === "true", cron: REFRESH_CRON, tz: CRON_TZ });
-  } catch (e) { logErr("debug", e); res.status(500).json({ error: "debug error" }); }
+    const cat = listCatalog.all().length;
+    const rc = countRarity.get() || {};
+    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: MAX_CONC, minGapMs: MIN_GAP }});
+  } catch (e) { logErr("stats", e); res.status(500).json({ error: "stats error" }); }
 });
 
 // UI

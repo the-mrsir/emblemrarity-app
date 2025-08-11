@@ -1,35 +1,45 @@
-# Emblem Rarity v7.1 — Nightly bulk refresh (no user data)
+# Emblem Rarity v8 — Instant rarity via cache-first + nightly snapshot
 
-What’s new
-- **No user data stored**: removed any per-user ownership tables. Tokens remain memory-only.
-- **Global-only storage**: we keep just the `emblem_catalog` (itemHash, name, icon) and `rarity_cache`.
-- **Nightly cron**: refreshes rarity for every item in the global catalog (default: 3AM America/New_York).
-- **Full grid loads**: we build from catalog and fill missing names/icons for a batch immediately; rest in background.
+Focus: **no user data stored**, fast loads, minimal scraping.
 
-Environment (Railway → Variables)
-```
-BASE_URL = https://emblemrarity.app
-BUNGIE_API_KEY = <your key>
-BUNGIE_CLIENT_ID = <your id>
-BUNGIE_CLIENT_SECRET = <your secret>
-# optional cron settings:
-CRON_ENABLED = true
-REFRESH_CRON = 0 3 * * *         # 3:00 AM
-CRON_TZ = America/New_York
-# optional rarity cache tuning:
-LIGHTGG_NULL_TTL = 3600          # seconds to wait before retrying a null
-LIGHTGG_TTL = 1209600            # 14 days
-LIGHTGG_RETRY_MS = 4000
-```
+## What’s new
+- **Cache-first rarity API**: returns DB value instantly; if stale, refreshes in the background.
+- **30d TTL for positives, 30m TTL for nulls** (tunable with env).
+- **Nightly cron refresh** of *all* emblems in the global catalog, plus a **rarity-snapshot.json** written to `/public` for the client to prefill badges offline.
+- **Scrape throttle**: global queue with configurable concurrency (default 2) and min gap between requests to avoid anti-bot pages.
+- **Admin endpoint** `POST /admin/refresh` with `x-admin-key` to force a full refresh + rewrite snapshot (no user data involved).
+- **UI prefill**: client fetches `rarity-snapshot.json` and shows percentages immediately; lazy `/api/rarity` calls are cache hits most of the time.
+- **Stats** at `/stats` and snapshot caching headers for better browser perf.
 
-Notes
-- The catalog grows passively as users browse, but **nothing is linked to a user**.
-- Nightly job runs `refreshAllRarities()` across the catalog and updates `rarity_cache` only.
-- You can hit `/debug` to see catalog size and cron status.
-
-Deploy
+## Deploy
 ```bash
-git add .
-git commit -m "v7.1: nightly bulk refresh; no user data persisted"
+git add -A
+git commit -m "v8: cache-first rarity + nightly snapshot + throttle"
 git push
 ```
+Railway → Variables (or copy `.env.example`):
+```
+BASE_URL=https://emblemrarity.app
+BUNGIE_API_KEY=...
+BUNGIE_CLIENT_ID=...
+BUNGIE_CLIENT_SECRET=...
+ADMIN_KEY=change-me
+CRON_ENABLED=true
+REFRESH_CRON=0 3 * * *
+CRON_TZ=America/New_York
+LIGHTGG_TTL=2592000
+LIGHTGG_NULL_TTL=1800
+LIGHTGG_RETRY_MS=4000
+RARITY_CONCURRENCY=2
+RARITY_MIN_GAP_MS=200
+```
+
+Optional: use the included **Dockerfile** for a fully pinned Playwright runtime.
+
+## Quick checks
+- `GET /stats` → see `catalogCount` and rarity counts.
+- `GET /rarity-snapshot.json` → array of cached rarities.
+- `POST /admin/refresh` with header `x-admin-key: <ADMIN_KEY>` to force a rebuild (no user data touched).
+
+## Privacy
+- We persist **only** global emblem metadata and rarity numbers — no membership IDs, no ownership, no tokens on disk.
