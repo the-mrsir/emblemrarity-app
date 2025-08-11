@@ -69,19 +69,35 @@ let threshold = null;
 let snapshot = {};
 let snapshotLoaded = false;
 
-// Load snapshot (prefill % instantly if available)
-fetch("/rarity-snapshot.json")
-  .then(r=>r.ok?r.json():[])
-  .then(arr => {
-    (arr || []).forEach(r => { snapshot[r.itemHash] = r; });
-    snapshotLoaded = true;
-    // if data already present, seed and re-render
-    if (data.length) { seedFromSnapshot(); render(); }
-  })
-  .catch(()=>{});
+// Load snapshot first
+fetch("/rarity-snapshot.json").then(r=>r.ok?r.json():[]).then(arr=>{
+  (arr||[]).forEach(r=>{ snapshot[r.itemHash]=r; });
+  snapshotLoaded = true;
+  if (data.length) { seedFromSnapshot(); render(); }
+}).catch(()=>{});
 
-// Lazy rarity fetch for visible cards (cache-first server will be instant)
-// Also: update data + auto resort when a new % arrives
+// Background prefetch of rarity for everything missing
+async function prefetchMissing(conc=6) {
+  const todo = data.filter(d => d.rarityPercent == null).map(d => d.itemHash);
+  let i=0;
+  async function worker() {
+    while (i < todo.length) {
+      const h = todo[i++];
+      try {
+        const r = await fetch(`/api/rarity?hash=${encodeURIComponent(h)}`).then(r=>r.json());
+        const j = data.findIndex(x => x.itemHash == h);
+        if (j >= 0 && r && r.percent != null) {
+          data[j].rarityPercent = r.percent;
+          data[j].rarityLabel = r.label;
+          data[j].rarityUpdatedAt = r.updatedAt;
+          if (sortSel.value === "rarity") render();
+        }
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({length: Math.min(conc, todo.length)}, worker));
+}
+
 const io = new IntersectionObserver((entries) => {
   entries.forEach(async (entry) => {
     if (!entry.isIntersecting) return;
@@ -102,7 +118,6 @@ const io = new IntersectionObserver((entries) => {
         const days = Math.floor(ageMs / (1000*60*60*24));
         upd.textContent = days > 0 ? `Updated ${days}d ago` : "Updated today";
       }
-      // Update data & resort if sorting by rarity
       const idx = data.findIndex(x => String(x.itemHash) === String(hash));
       if (idx >= 0 && r && r.percent != null) {
         data[idx].rarityPercent = r.percent;
@@ -146,7 +161,6 @@ function render() {
     const imgwrap = document.createElement("div"); imgwrap.className="imgwrap";
     const img = document.createElement("img"); img.loading="lazy"; img.src=e.image||""; img.alt=e.name;
     const badge = document.createElement("div"); badge.className="badge";
-    // prefill from snapshot if UI hasn't got a server value
     let pctVal = e.rarityPercent;
     if (pctVal == null && snapshot[e.itemHash]?.percent != null) pctVal = snapshot[e.itemHash].percent;
     const pct = pctVal == null ? "..." : Number(pctVal).toFixed(4) + "%";
@@ -171,50 +185,6 @@ function render() {
   document.querySelectorAll(".card").forEach(c => io.observe(c));
 }
 
-// Background prefetch of all missing rarities (so you don't have to scroll to trigger)
-async function prefetchMissing(conc=6) {
-  const todo = data.filter(d => d.rarityPercent == null).map(d => d.itemHash);
-  let i=0;
-  async function worker() {
-    while (i < todo.length) {
-      const h = todo[i++];
-      try {
-        const r = await fetch(`/api/rarity?hash=${encodeURIComponent(h)}`).then(r=>r.json());
-        const j = data.findIndex(x => x.itemHash == h);
-        if (j >= 0 && r && r.percent != null) {
-          data[j].rarityPercent = r.percent;
-          data[j].rarityLabel = r.label;
-          data[j].rarityUpdatedAt = r.updatedAt;
-          if (sortSel.value === "rarity") render();
-        }
-      } catch {}
-    }
-  }
-  await Promise.all(Array.from({length: Math.min(conc, todo.length)}, worker));
-}
-
-async function loadData() {
-  statusEl.textContent = "Fetching your emblems...";
-  const json = await fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`).then(r=>r.json());
-  data = json.emblems || [];
-  if (!data.length){ statusEl.textContent="No emblems found."; return; }
-
-  // Seed from snapshot before first render (if already loaded)
-  seedFromSnapshot();
-  render();
-
-  // If snapshot was late, seed again once it arrives
-  if (!snapshotLoaded) {
-    const iv = setInterval(() => {
-      if (snapshotLoaded) { clearInterval(iv); if (seedFromSnapshot() && sortSel.value === "rarity") render(); }
-    }, 200);
-    setTimeout(()=>clearInterval(iv), 3000);
-  }
-
-  // Kick off background prefetch so values fill in even if not scrolled
-  prefetchMissing();
-}
-
 chips.forEach(ch => {
   ch.addEventListener("click", () => {
     chips.forEach(c => c.classList.remove("active"));
@@ -224,6 +194,16 @@ chips.forEach(ch => {
     render();
   });
 });
+
+async function loadData() {
+  statusEl.textContent = "Fetching your emblems...";
+  const json = await fetch(`/api/emblems?sid=${encodeURIComponent(sid)}`).then(r=>r.json());
+  data = json.emblems || [];
+  if (!data.length){ statusEl.textContent="No emblems found."; return; }
+  seedFromSnapshot();
+  render();
+  prefetchMissing();
+}
 
 if (sid) {
   loginBtn.style.display = "none";
