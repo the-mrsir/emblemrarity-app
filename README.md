@@ -13,3 +13,7 @@ git add -A
 git commit -m "v8.1: snapshot seeding + live re-sort + background prefetch"
 git push
 ```
+
+
+## v8.1.1
+- Fix: removed duplicate `chips` declaration in the client to prevent a JS SyntaxError that blocked login flow.
