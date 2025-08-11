@@ -264,9 +264,10 @@ async function populateCatalog(force = false) {
       throw new Error("Failed to get manifest");
     }
     
-    const inventoryItemPath = manifest.inventoryItem?.jsonPath;
+    const componentPaths = manifest?.jsonWorldComponentContentPaths?.en || manifest?.jsonWorldComponentContentPaths?.en_us || manifest?.jsonWorldComponentContentPaths?.en_US;
+    const inventoryItemPath = componentPaths?.DestinyInventoryItemDefinition;
     if (!inventoryItemPath) {
-      throw new Error("No inventory item manifest found");
+      throw new Error("No DestinyInventoryItemDefinition component path found in manifest");
     }
     
     log.info("Downloading inventory item manifest...");
@@ -456,7 +457,7 @@ async function getEntity(entityType, hash) {
     const response = await BUNGIE.get(`/Destiny2/Manifest/${entityType}/${hash}/`);
     const data = response.data?.Response;
     
-    if (!data) return null;
+        if (!data) return null;
     
     if (entityType === "DestinyCollectibleDefinition" && data?.itemHash != null) {
       setCollectible.run(hash, data.itemHash);
@@ -740,7 +741,7 @@ async function gracefulShutdown(signal) {
     }
     
     log.info("Graceful shutdown completed");
-    process.exit(0);
+  process.exit(0);
   } catch (error) {
     log.error({ error: error.message }, "Error during graceful shutdown");
     process.exit(1);
@@ -765,8 +766,8 @@ process.on('unhandledRejection', (reason, promise) => {
 let server;
 server = app.listen(PORT, async () => {
   try {
-    await launchBrowser();
-    log.info(`Listening on ${PORT}`);
+  await launchBrowser();
+  log.info(`Listening on ${PORT}`);
     
     // Check if we need to sync on startup
     if (shouldSyncToday()) {

@@ -22,6 +22,7 @@ const BUNGIE = axios.create({
 });
 
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "emblems.db");
 
 async function populateCatalog(force = false) {
@@ -64,9 +65,10 @@ async function populateCatalog(force = false) {
       throw new Error("Failed to get manifest");
     }
     
-    const inventoryItemPath = manifest.inventoryItem?.jsonPath;
+    const componentPaths = manifest?.jsonWorldComponentContentPaths?.en || manifest?.jsonWorldComponentContentPaths?.en_us || manifest?.jsonWorldComponentContentPaths?.en_US;
+    const inventoryItemPath = componentPaths?.DestinyInventoryItemDefinition;
     if (!inventoryItemPath) {
-      throw new Error("No inventory item manifest found");
+      throw new Error("No DestinyInventoryItemDefinition component path found in manifest");
     }
     
     console.log("Downloading inventory item manifest...");
