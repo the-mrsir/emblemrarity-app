@@ -11,7 +11,7 @@ import { launchBrowser, queueScrape } from "./worker.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const log = pino({ level: process.env.LOG_LEVEL || "info", transport: process.env.NODE_ENV==="production" ? undefined : { target: "pino-pretty", options: { colorize: true } } });
+const log = pino({ level: process.env.LOG_LEVEL || "info" });
 
 const {
   PORT = 3000,
@@ -19,18 +19,16 @@ const {
   BUNGIE_API_KEY,
   BUNGIE_CLIENT_ID,
   BUNGIE_CLIENT_SECRET,
-  // Admin
   ADMIN_KEY,
   ALLOW_QUERY_ADMIN = "true",
-  // Cron
   CRON_ENABLED = "true",
   REFRESH_CRON = "0 3 * * *",
   CRON_TZ = "America/New_York",
-  // Rarity cache TTLs
-  LIGHTGG_TTL = "2592000",        // 30d for positives
-  LIGHTGG_NULL_TTL = "1800",      // 30m for nulls
-  // Bungie/manifest concurrency
-  BUNGIE_CONCURRENCY = "12"
+  LIGHTGG_TTL = "2592000",
+  LIGHTGG_NULL_TTL = "1800",
+  BUNGIE_CONCURRENCY = "12",
+  RARITY_CONCURRENCY = "2",
+  RARITY_MIN_GAP_MS = "200"
 } = process.env;
 
 if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) {
@@ -39,7 +37,9 @@ if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) 
 }
 
 const app = express();
+app.use(express.json({ limit: "1mb" }));
 app.use(express.static("public"));
+
 // Serve snapshot even if file missing (return empty array)
 app.get("/rarity-snapshot.json", (req, res) => {
   const fp = path.join(__dirname, "public", "rarity-snapshot.json");
@@ -52,7 +52,8 @@ app.get("/rarity-snapshot.json", (req, res) => {
   } catch { return res.json([]); }
 });
 
-app.use(express.json({ limit: "1mb" }));
+// health
+app.get("/health", (req,res)=>res.json({ok:true}));
 
 const BUNGIE = axios.create({
   baseURL: "https://www.bungie.net/Platform",
@@ -74,6 +75,7 @@ function isAdmin(req){
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_DIR || path.join(process.cwd(), "data");
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, "cache.db");
+
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.exec(`
@@ -104,7 +106,7 @@ const setRarity = db.prepare("INSERT INTO rarity_cache (itemHash,percent,label,s
 const countRarity = db.prepare("SELECT SUM(CASE WHEN percent IS NULL THEN 1 ELSE 0 END) as nulls, SUM(CASE WHEN percent IS NOT NULL THEN 1 ELSE 0 END) as nonnull FROM rarity_cache");
 
 // ---------------- OAuth (memory tokens) ----------------
-const tokens = new Map(); // sid -> {access_token, refresh_token, expires_at}
+const tokens = new Map();
 function makeState(){ return Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2); }
 
 app.get("/login", (req, res) => {
@@ -299,8 +301,7 @@ async function refreshAllRarities(limit=null){
   const rows = listCatalog.all();
   const hashes = rows.map(r => r.itemHash);
   const target = limit ? hashes.slice(0, limit) : hashes;
-  log.info({ total: target.length }, "nightly refresh start");
-  let done = 0;
+  log.info({ total: target.length }, "refresh start");
   await Promise.all(target.map(h => new Promise((resolve) => {
     queueScrape(h, (r) => {
       setRarity.run(h, r.percent, r.label, r.source, Math.floor(Date.now()/1000));
@@ -308,7 +309,7 @@ async function refreshAllRarities(limit=null){
     });
   })));
   writeSnapshotSafe();
-  log.info({ total: target.length }, "nightly refresh done");
+  log.info({ total: target.length }, "refresh done");
 }
 
 if (CRON_ENABLED === "true" && REFRESH_CRON){
@@ -316,12 +317,34 @@ if (CRON_ENABLED === "true" && REFRESH_CRON){
     refreshAllRarities().catch(e => log.error({ err:e?.message }, "cron refresh failed"));
   }, { timezone: CRON_TZ });
   log.info({ cron: REFRESH_CRON, tz: CRON_TZ }, "cron scheduled");
+}
 
 // public refresh lock
 let publicRefreshBusy = false;
 let publicRefreshLast = 0;
 
-}
+// ---- Public refresh endpoints (no auth; temporary) ----
+app.get("/refresh-now", async (req,res) => {
+  if (publicRefreshBusy) return res.status(429).json({ error: "busy" });
+  publicRefreshBusy = true; publicRefreshLast = Date.now();
+  try {
+    await launchBrowser();
+    const limit = req.query?.limit ? Number(req.query.limit) : null;
+    await refreshAllRarities(limit);
+    const { nulls, nonnull } = countRarity.get() || {};
+    res.json({ ok:true, rarity:{ nulls, nonnull }, last: publicRefreshLast });
+  } catch(e) {
+    log.error({ err:e?.message }, "refresh-now error");
+    res.status(500).json({ error:"refresh error" });
+  } finally {
+    publicRefreshBusy = false;
+  }
+});
+
+app.get("/snapshot-now", (req,res)=>{
+  try{ writeSnapshotSafe(); res.json({ ok:true }); }
+  catch(e){ res.status(500).json({ error:"snapshot error" }); }
+});
 
 // ---------------- API ----------------
 app.get("/api/emblems", async (req, res) => {
@@ -388,38 +411,7 @@ app.get("/api/rarity", async (req, res) => {
   }catch(e){ log.error({ err:e?.message }, "/api/rarity failed"); res.status(500).json({ error:"rarity error" }); }
 });
 
-// ---- Public refresh endpoints (no auth; temporary) ----
-app.get("/refresh-now", async (req,res) => {
-  if (publicRefreshBusy) return res.status(429).json({ error: "busy" });
-  publicRefreshBusy = true; publicRefreshLast = Date.now();
-  try{
-    await launchBrowser();
-    const limit = req.query?.limit ? Number(req.query.limit) : null;
-    await refreshAllRarities(limit);
-    const { nulls, nonnull } = countRarity.get() || {};
-    return res.json({ ok:true, rarity:{ nulls, nonnull }, last: publicRefreshLast });
-  }catch(e){
-    log.error({ err:e?.message }, "refresh-now error");
-    return res.status(500).json({ error:"refresh error" });
-  } finally {
-    publicRefreshBusy = false;
-  }
-});
-    publicRefreshBusy = true; publicRefreshLast = Date.now();
-    const limit = req.query?.limit ? Number(req.query.limit) : null;
-    await launchBrowser();
-    await refreshAllRarities(limit);
-    publicRefreshBusy = false;
-    const { nulls, nonnull } = countRarity.get() || {};
-    return res.json({ ok:true, rarity:{ nulls, nonnull }, last: publicRefreshLast });
-  }catch(e){ publicRefreshBusy = false; log.error({ err:e?.message }, "refresh-now error"); return res.status(500).json({ error:"refresh error" }); }
-});
-app.get("/snapshot-now", (req,res)=>{
-  try{ writeSnapshotSafe(); res.json({ ok:true }); }
-  catch(e){ res.status(500).json({ error:"snapshot error" }); }
-});
-
-// Admin endpoints
+// Admin endpoints (still available if configured)
 app.get("/admin/help", (req,res) => {
   const k = normKey(ADMIN_KEY);
   const allow = String(ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
@@ -433,7 +425,6 @@ app.get("/admin/refresh", async (req,res) => {
   try{
     if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
     const limit = req.query?.limit ? Number(req.query.limit) : null;
-    await launchBrowser();
     await refreshAllRarities(limit);
     const { nulls, nonnull } = countRarity.get() || {};
     res.json({ ok:true, rarity: { nulls, nonnull } });
@@ -447,21 +438,6 @@ app.post("/admin/snapshot", (req,res) => {
   }catch(e){ res.status(500).json({ error:"snapshot error" }); }
 });
 
-app.get("/stats", (req,res) => {
-  try{
-    const cat = listCatalog.all().length;
-    const rc = countRarity.get() || {};
-    res.json({
-      catalogCount: cat,
-      rarity: rc,
-      cron: { enabled: String(CRON_ENABLED)==="true", spec: REFRESH_CRON, tz: CRON_TZ },
-      throttle: { concurrency: 2, minGapMs: 200 },
-      adminConfigured: Boolean(normKey(ADMIN_KEY))
-    });
-  }catch(e){ res.status(500).json({ error:"stats error" }); }
-});
-
-app.get("/health", (req,res)=>res.json({ok:true}));
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 process.on("SIGTERM", async () => {
