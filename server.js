@@ -33,6 +33,7 @@ if (!BASE_URL || !BUNGIE_API_KEY || !BUNGIE_CLIENT_ID || !BUNGIE_CLIENT_SECRET) 
 }
 
 const app = express();
+const BUNGIE_CONC = Number(process.env.BUNGIE_CONCURRENCY || "12");
 app.use(express.static("public"));
 
 const BUNGIE = axios.create({
@@ -271,13 +272,13 @@ async function getOwnedEmblemItemHashes(profile) {
   const itemHashes = (await concurrentMap(ownedArr, async (collHash) => {
     const coll = await getEntity("DestinyCollectibleDefinition", collHash);
     return coll?.itemHash ?? null;
-  }, Number(process.env.BUNGIE_CONCURRENCY||"12")).filter(Boolean);
+  }, BUNGIE_CONC)).filter(Boolean);
 
   const emblemHashes = (await concurrentMap(itemHashes, async (itemHash) => {
     const item = await getEntity("DestinyInventoryItemDefinition", itemHash);
     const cats = item?.itemCategoryHashes || [];
     return cats.includes(19) ? itemHash : null;
-  }, Number(process.env.BUNGIE_CONCURRENCY||"12")).filter(Boolean);
+  }, BUNGIE_CONC)).filter(Boolean);
 
   return [...new Set(emblemHashes)];
 }
