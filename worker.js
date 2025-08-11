@@ -5,9 +5,12 @@ let active = 0;
 const MAX_CONC = Number(process.env.RARITY_CONCURRENCY || "2");
 const MIN_GAP = Number(process.env.RARITY_MIN_GAP_MS || "200");
 const COOLDOWN_MS = Number(process.env.RARITY_COOLDOWN_MS || "180000");
+const BATCH_SIZE = Number(process.env.RARITY_BATCH_SIZE || "3");
+const BATCH_INTERVAL_MS = Number(process.env.RARITY_BATCH_INTERVAL_MS || "180000");
 let lastAt = 0;
 let cooldownUntil = 0;
 let recent403 = 0;
+let processedInWindow = 0;
 
 const queue = [];
 function runQueue(){
@@ -16,9 +19,17 @@ function runQueue(){
     setTimeout(runQueue, Math.max(50, cooldownUntil - Date.now()));
     return;
   }
+  // Enforce batch window (process BATCH_SIZE then pause BATCH_INTERVAL_MS)
+  if (processedInWindow >= BATCH_SIZE){
+    cooldownUntil = Date.now() + BATCH_INTERVAL_MS;
+    processedInWindow = 0;
+    setTimeout(runQueue, BATCH_INTERVAL_MS);
+    return;
+  }
   const task = queue.shift();
   if (!task) return;
   active++;
+  processedInWindow++;
   (async () => {
     const jitter = Math.floor(Math.random() * MIN_GAP);
     const wait = Math.max(0, (MIN_GAP + jitter) - (Date.now() - lastAt));
