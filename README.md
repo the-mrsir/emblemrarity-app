@@ -15,5 +15,11 @@ git push
 ```
 
 
-## v8.1.1
-- Fix: removed duplicate `chips` declaration in the client to prevent a JS SyntaxError that blocked login flow.
+## v8.1.2
+- Admin auth is easier: header **or** `?key=` query (enable/disable via `ALLOW_QUERY_ADMIN`, default true).
+- New endpoints:
+  - `GET /admin/ping?key=...` – quick auth check.
+  - `GET /admin/refresh?key=...&limit=200` – run warm job without curl JSON flags.
+  - `POST /admin/snapshot` – rewrite `rarity-snapshot.json` from the current cache.
+- `/stats` now shows `adminConfigured: true/false`.
+- Gentler Bungie fetch: `BUNGIE_CONCURRENCY` env (default 12).

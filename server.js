@@ -271,13 +271,13 @@ async function getOwnedEmblemItemHashes(profile) {
   const itemHashes = (await concurrentMap(ownedArr, async (collHash) => {
     const coll = await getEntity("DestinyCollectibleDefinition", collHash);
     return coll?.itemHash ?? null;
-  }, 32)).filter(Boolean);
+  }, Number(process.env.BUNGIE_CONCURRENCY||"12")).filter(Boolean);
 
   const emblemHashes = (await concurrentMap(itemHashes, async (itemHash) => {
     const item = await getEntity("DestinyInventoryItemDefinition", itemHash);
     const cats = item?.itemCategoryHashes || [];
     return cats.includes(19) ? itemHash : null;
-  }, 32)).filter(Boolean);
+  }, Number(process.env.BUNGIE_CONCURRENCY||"12")).filter(Boolean);
 
   return [...new Set(emblemHashes)];
 }
@@ -430,9 +430,37 @@ app.get("/rarity-snapshot.json", (req, res) => {
 });
 
 // Admin: force refresh + snapshot
+function isAdmin(req){
+  const key = process.env.ADMIN_KEY;
+  if (!key) return false;
+  const hdr = req.headers["x-admin-key"] || req.headers["x-admin_key"];
+  const allowQuery = String(process.env.ALLOW_QUERY_ADMIN||"true").toLowerCase()==="true";
+  const q = allowQuery ? (req.query.key || (req.body && req.body.key)) : null;
+  return (hdr && hdr === key) || (q && q === key);
+}
+app.get("/admin/ping", (req, res)=>{
+  if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
+  res.json({ ok:true, admin:true });
+});
+app.get("/admin/refresh", async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
+    const limit = req.query?.limit ? Number(req.query.limit) : null;
+    await refreshAllRarities(limit);
+    const { nulls, nonnull } = countRarity.get() || {};
+    res.json({ ok: true, rarity: { nulls, nonnull } });
+  } catch (e) { logErr("admin/refresh(get)", e); res.status(500).json({ error: "admin error" }); }
+});
+app.post("/admin/snapshot", (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
+    writeSnapshot();
+    res.json({ ok:true });
+  } catch (e) { logErr("admin/snapshot", e); res.status(500).json({ error: "snapshot error" }); }
+});
 app.post("/admin/refresh", express.json(), async (req, res) => {
   try {
-    if (!process.env.ADMIN_KEY || req.headers["x-admin-key"] !== process.env.ADMIN_KEY) return res.status(401).json({ error: "unauthorized" });
+    if (!isAdmin(req)) return res.status(401).json({ error: "unauthorized" });
     const limit = req.body?.limit ? Number(req.body.limit) : null;
     await refreshAllRarities(limit);
     const { nulls, nonnull } = countRarity.get() || {};
@@ -520,7 +548,7 @@ app.get("/stats", (req, res) => {
   try {
     const cat = listCatalog.all().length;
     const rc = countRarity.get() || {};
-    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: Number(process.env.RARITY_CONCURRENCY||"2"), minGapMs: Number(process.env.RARITY_MIN_GAP_MS||"200") }});
+    res.json({ catalogCount: cat, rarity: rc, cron: { enabled: CRON_ENABLED==="true", spec: REFRESH_CRON, tz: CRON_TZ }, throttle: { concurrency: Number(process.env.RARITY_CONCURRENCY||"2"), minGapMs: Number(process.env.RARITY_MIN_GAP_MS||"200") }, adminConfigured: Boolean(process.env.ADMIN_KEY) });
   } catch (e) { logErr("stats", e); res.status(500).json({ error: "stats error" }); }
 });
 
